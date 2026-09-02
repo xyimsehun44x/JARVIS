@@ -1,0 +1,15 @@
+.env
+credentials.json
+token.json
+*.token.json
+google.token.json
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.db
+*.sqlite3
+*.py[cod]
+dist/
+build/
+*.egg-info/

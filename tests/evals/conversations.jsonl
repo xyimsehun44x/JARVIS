@@ -1,0 +1,6 @@
+{"input":"Jarvis, tell me something interesting.","route":"conversation"}
+{"input":"I think I completely screwed up that interview.","route":"conversation"}
+{"input":"Email David a quick update.","route":"email","expects":"clarification"}
+{"input":"What's tomorrow looking like?","route":"calendar"}
+{"input":"Find when I'm free next week and email David two options.","route":"cross_domain"}
+

@@ -1,0 +1,4 @@
+{"input":"Move tomorrow's meeting.","expects":"reference_resolution"}
+{"input":"Move the dinner to Friday.","expects":"missing_time_clarification"}
+{"input":"Cancel the dinner.","followups":["no"],"external_writes":0}
+

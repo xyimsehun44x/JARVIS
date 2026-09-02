@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Protocol
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from jarvis.agents.calendar.schemas import (
+    CalendarEvent,
+    CalendarExecutionResult,
+    CalendarProposal,
+)
+
+
+class CalendarProvider(Protocol):
+    def list_events(self, start: datetime, end: datetime) -> list[CalendarEvent]: ...
+    def create_event(self, proposal: CalendarProposal) -> CalendarExecutionResult: ...
+    def update_event(self, proposal: CalendarProposal) -> CalendarExecutionResult: ...
+    def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult: ...
+
+
+class MockCalendarProvider:
+    def __init__(
+        self, events: list[CalendarEvent] | None = None, *, today: date | None = None
+    ) -> None:
+        base = today or date.today()
+        tomorrow = base + timedelta(days=1)
+        self.events = events if events is not None else [
+            CalendarEvent(
+                event_id="event-standup",
+                title="Team stand-up",
+                start=datetime.combine(tomorrow, time(10)),
+                end=datetime.combine(tomorrow, time(10, 30)),
+                attendees=["team@example.com"],
+            ),
+            CalendarEvent(
+                event_id="event-david",
+                title="Meeting with David Kim",
+                start=datetime.combine(tomorrow, time(15)),
+                end=datetime.combine(tomorrow, time(16)),
+                attendees=["david.kim@example.com"],
+            ),
+            CalendarEvent(
+                event_id="event-dinner",
+                title="Dinner with Minho",
+                start=datetime.combine(tomorrow, time(19)),
+                end=datetime.combine(tomorrow, time(20, 30)),
+                attendees=["minho@example.com"],
+            ),
+        ]
+
+    def list_events(self, start: datetime, end: datetime) -> list[CalendarEvent]:
+        return sorted(
+            [event.model_copy(deep=True) for event in self.events if event.start < end and event.end > start],
+            key=lambda event: event.start,
+        )
+
+    def create_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        event_id = proposal.event_id or f"event-{uuid4().hex[:10]}"
+        self.events.append(
+            CalendarEvent(event_id=event_id, **proposal.model_dump(exclude={"operation", "event_id"}))
+        )
+        return CalendarExecutionResult(ok=True, event_id=event_id)
+
+    def update_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        for index, event in enumerate(self.events):
+            if event.event_id == proposal.event_id:
+                self.events[index] = CalendarEvent(
+                    event_id=event.event_id,
+                    title=proposal.title,
+                    start=proposal.start,
+                    end=proposal.end,
+                    attendees=proposal.attendees,
+                )
+                return CalendarExecutionResult(ok=True, event_id=event.event_id)
+        return CalendarExecutionResult(ok=False, error="Event not found")
+
+
+class GoogleCalendarProvider:
+    def __init__(
+        self,
+        oauth,
+        *,
+        timezone_name: str,
+        calendar_id: str = "primary",
+        allow_writes: bool = False,
+    ) -> None:
+        self.oauth = oauth
+        self.timezone_name = timezone_name
+        self.tz = ZoneInfo(timezone_name)
+        self.calendar_id = calendar_id
+        self.allow_writes = allow_writes
+
+    def list_events(self, start: datetime, end: datetime) -> list[CalendarEvent]:
+        service = self.oauth.service("calendar", "v3")
+        response = (
+            service.events()
+            .list(
+                calendarId=self.calendar_id,
+                timeMin=self._aware(start).isoformat(),
+                timeMax=self._aware(end).isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=250,
+            )
+            .execute()
+        )
+        return [
+            event
+            for item in response.get("items", [])
+            if (event := self._to_event(item)) is not None
+        ]
+
+    def create_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        if not self.allow_writes:
+            return self._write_disabled()
+        try:
+            result = (
+                self.oauth.service("calendar", "v3")
+                .events()
+                .insert(
+                    calendarId=self.calendar_id,
+                    body=self._body(proposal),
+                    sendUpdates="all",
+                )
+                .execute()
+            )
+            return self._verify(result.get("id"), proposal)
+        except Exception as exc:
+            return CalendarExecutionResult(ok=False, error=str(exc))
+
+    def update_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        if not self.allow_writes:
+            return self._write_disabled()
+        if not proposal.event_id:
+            return CalendarExecutionResult(ok=False, error="Missing event ID")
+        try:
+            result = (
+                self.oauth.service("calendar", "v3")
+                .events()
+                .patch(
+                    calendarId=self.calendar_id,
+                    eventId=proposal.event_id,
+                    body=self._body(proposal),
+                    sendUpdates="all",
+                )
+                .execute()
+            )
+            return self._verify(result.get("id"), proposal)
+        except Exception as exc:
+            return CalendarExecutionResult(ok=False, error=str(exc))
+
+    def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        if not self.allow_writes:
+            return self._write_disabled()
+        if not proposal.event_id:
+            return CalendarExecutionResult(ok=False, error="Missing event ID")
+        try:
+            service = self.oauth.service("calendar", "v3")
+            service.events().delete(
+                calendarId=self.calendar_id,
+                eventId=proposal.event_id,
+                sendUpdates="all",
+            ).execute()
+            try:
+                service.events().get(
+                    calendarId=self.calendar_id, eventId=proposal.event_id
+                ).execute()
+                return CalendarExecutionResult(
+                    ok=False, event_id=proposal.event_id, error="Event still exists after deletion"
+                )
+            except Exception as verification_error:
+                status = getattr(getattr(verification_error, "resp", None), "status", None)
+                if status not in {404, 410}:
+                    raise
+            return CalendarExecutionResult(ok=True, event_id=proposal.event_id)
+        except Exception as exc:
+            return CalendarExecutionResult(ok=False, error=str(exc))
+
+    def _verify(
+        self, event_id: str | None, proposal: CalendarProposal
+    ) -> CalendarExecutionResult:
+        if not event_id:
+            return CalendarExecutionResult(ok=False, error="Calendar returned no event ID")
+        item = (
+            self.oauth.service("calendar", "v3")
+            .events()
+            .get(calendarId=self.calendar_id, eventId=event_id)
+            .execute()
+        )
+        event = self._to_event(item)
+        ok = bool(event and event.title == proposal.title and event.start == proposal.start)
+        return CalendarExecutionResult(
+            ok=ok,
+            event_id=event_id,
+            error=None if ok else "Calendar verification did not match the approved payload",
+        )
+
+    def _body(self, proposal: CalendarProposal) -> dict:
+        return {
+            "summary": proposal.title,
+            "start": {
+                "dateTime": self._aware(proposal.start).isoformat(),
+                "timeZone": self.timezone_name,
+            },
+            "end": {
+                "dateTime": self._aware(proposal.end).isoformat(),
+                "timeZone": self.timezone_name,
+            },
+            "attendees": [{"email": email} for email in proposal.attendees],
+        }
+
+    def _to_event(self, item: dict) -> CalendarEvent | None:
+        start_data = item.get("start", {})
+        end_data = item.get("end", {})
+        try:
+            start = self._parse_datetime(start_data)
+            end = self._parse_datetime(end_data)
+        except (KeyError, ValueError):
+            return None
+        return CalendarEvent(
+            event_id=item["id"],
+            title=item.get("summary", "Untitled event"),
+            start=start,
+            end=end,
+            attendees=[
+                attendee["email"]
+                for attendee in item.get("attendees", [])
+                if attendee.get("email")
+            ],
+        )
+
+    def _parse_datetime(self, value: dict) -> datetime:
+        if "dateTime" in value:
+            parsed = datetime.fromisoformat(value["dateTime"].replace("Z", "+00:00"))
+            return parsed.astimezone(self.tz).replace(tzinfo=None)
+        return datetime.combine(date.fromisoformat(value["date"]), time.min)
+
+    def _aware(self, value: datetime) -> datetime:
+        return value.replace(tzinfo=self.tz) if value.tzinfo is None else value.astimezone(self.tz)
+
+    @staticmethod
+    def _write_disabled() -> CalendarExecutionResult:
+        return CalendarExecutionResult(
+            ok=False,
+            error="Live Calendar writes are disabled by JARVIS_ALLOW_CALENDAR_WRITES",
+        )
+
+    def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        for event in self.events:
+            if event.event_id == proposal.event_id:
+                self.events.remove(event)
+                return CalendarExecutionResult(ok=True, event_id=event.event_id)
+        return CalendarExecutionResult(ok=False, error="Event not found")
