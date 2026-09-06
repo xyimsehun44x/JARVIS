@@ -6,8 +6,9 @@ user-facing persona, normal conversation is a first-class path, specialists exch
 typed data, and externally visible actions require approval of the exact payload.
 
 The project supports two modes. `mock` is the safe default for tests and offline
-development. `google` uses the OpenAI Responses API, Google People, Gmail, Google
-Calendar, and durable SQLite checkpoints. Live email sending and calendar changes have
+development. `google` uses Gemini 3.8 Flash by default, Google People, Gmail, Google
+Calendar, and durable SQLite checkpoints. OpenAI remains an optional model provider.
+Live email sending and calendar changes have
 independent feature locks in addition to Jarvis's exact-payload approvals.
 
 ## Run
@@ -21,7 +22,10 @@ python main.py --text
 
 ## Configure real services
 
-1. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
+1. Copy `.env.example` to `.env` and set `GEMINI_API_KEY`.
+   `low` reasoning is used for voice responsiveness, and routing plus an ordinary
+   conversational reply share one model request. Change
+   `JARVIS_GEMINI_THINKING_LEVEL` if a task needs deeper reasoning.
 2. In a Google Cloud project, enable Gmail API, Google Calendar API, and People API.
 3. Configure the OAuth consent screen, create a **Desktop app** OAuth client, and save
    the downloaded file as `credentials.json` in this directory.
@@ -102,3 +106,9 @@ Voice remains optional because its local model packages are large. Install with
 graph, permissions, OAuth providers, and persistent thread are used in either mode.
 The first voice launch downloads the selected faster-whisper and Kokoro model assets;
 subsequent launches reuse the local model cache.
+
+The default voice profile favors responsiveness: `base.en`, greedy Whisper decoding,
+low Gemini thinking, concise spoken answers, and no separate model-routing request for
+ordinary conversation. Set `JARVIS_STT_MODEL=small` if recognition accuracy matters
+more than transcription speed. Add uncommon contact names to the comma-separated
+`JARVIS_STT_HOTWORDS` setting to improve name recognition.

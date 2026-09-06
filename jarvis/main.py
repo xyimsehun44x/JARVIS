@@ -42,7 +42,12 @@ def main() -> None:
         from jarvis.voice.stt import PushToTalkSTT
         from jarvis.voice.tts import KokoroTTS
 
-        stt, tts = PushToTalkSTT(), KokoroTTS()
+        stt = PushToTalkSTT(
+            model_size=settings.stt_model,
+            beam_size=settings.stt_beam_size,
+            hotwords=settings.stt_hotwords,
+        )
+        tts = KokoroTTS()
 
     print(f"Jarvis ready ({settings.mode} mode, thread: {thread_id}). Type 'quit' to leave.")
     try:
@@ -54,13 +59,20 @@ def main() -> None:
                 break
             if not user_text:
                 continue
-            result = jarvis.turn(user_text, thread_id=thread_id)
-            while result.needs_input:
-                print(f"Jarvis: {result.prompt}")
-                answer = stt.listen() if stt else input("You: ").strip()
-                if stt:
-                    print(f'Heard: "{answer}"')
-                result = jarvis.resume(answer, thread_id=thread_id)
+            try:
+                result = jarvis.turn(user_text, thread_id=thread_id)
+                while result.needs_input:
+                    print(f"Jarvis: {result.prompt}")
+                    answer = stt.listen() if stt else input("You: ").strip()
+                    if stt:
+                        print(f'Heard: "{answer}"')
+                    result = jarvis.resume(answer, thread_id=thread_id)
+            except Exception as exc:
+                response = _friendly_runtime_error(exc)
+                print(f"Jarvis: {response}")
+                if tts:
+                    tts.speak(response)
+                continue
             print(f"Jarvis: {result.response}")
             if tts and result.response:
                 tts.speak(result.response)
@@ -70,8 +82,14 @@ def main() -> None:
 
 def _print_readiness(settings: Settings) -> None:
     print(f"Mode: {settings.mode}")
-    print(f"LLM: {settings.llm_provider} ({settings.openai_model})")
+    model = (
+        settings.gemini_model
+        if settings.llm_provider == "gemini"
+        else settings.openai_model
+    )
+    print(f"LLM: {settings.llm_provider} ({model})")
     print(f"OpenAI API key: {'configured' if settings.openai_api_key else 'missing'}")
+    print(f"Gemini API key: {'configured' if settings.gemini_api_key else 'missing'}")
     print(
         "Google credentials: "
         + ("found" if Path(settings.google_credentials_path).is_file() else "missing")
@@ -91,6 +109,9 @@ def _print_readiness(settings: Settings) -> None:
             else "missing"
         )
     )
+    print(f"Voice STT: {settings.stt_model} (beam size {settings.stt_beam_size})")
+    hotword_count = len([word for word in settings.stt_hotwords.split(",") if word.strip()])
+    print(f"Voice name hints: {hotword_count} configured")
     errors = settings.configuration_errors()
     if errors:
         print("Not ready:")
@@ -116,6 +137,15 @@ def _setup_google(settings: Settings) -> None:
     )
     oauth.authorize(interactive=True)
     print(f"Google authorization saved to {settings.google_token_path}.")
+
+
+def _friendly_runtime_error(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "quota" in message or "429" in message or "rate limit" in message:
+        return "The Gemini service has reached its current rate limit. Please try again shortly."
+    if "timeout" in message or "timed out" in message:
+        return "The service took too long to respond. Please try that again."
+    return "I encountered a service error, but the session is still running. Please try again."
 
 
 if __name__ == "__main__":

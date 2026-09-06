@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import Enum
 
 
@@ -29,6 +30,66 @@ class Router:
         "add dinner",
         "add meeting",
     )
+
+    def explicit_route(self, text: str) -> Route | None:
+        """Return an unambiguous route without spending a model round trip."""
+        lowered = text.lower()
+        email = bool(re.search(r"\b(?:email|e-mail|mail)\b", lowered))
+        calendar = any(
+            marker in lowered
+            for marker in (
+                "calendar",
+                "my schedule",
+                "tomorrow looking",
+                "am i free",
+                "when am i free",
+                "when i'm free",
+                "when i am free",
+                "free next",
+                "available next",
+            )
+        ) or bool(
+            re.search(
+                r"\b(?:create|add|book|move|reschedule|cancel)\b.*"
+                r"\b(?:meeting|event|lunch|dinner|appointment|call)\b",
+                lowered,
+            )
+        )
+        cross_domain = email and any(
+            marker in lowered
+            for marker in (
+                "when i'm free",
+                "when i am free",
+                "free next",
+                "available next",
+                "check my calendar",
+                "check my schedule",
+                "find a time",
+                "find when",
+            )
+        )
+        if cross_domain:
+            return Route.CROSS_DOMAIN
+        if email:
+            return Route.EMAIL
+        if calendar:
+            return Route.CALENDAR
+        return None
+
+    @staticmethod
+    def may_need_model_routing(text: str) -> bool:
+        """Identify possible implicit actions that still deserve semantic routing."""
+        lowered = text.lower().strip()
+        if re.search(r"\btell\s+(?:him|her|them|[A-Z][a-z]+)\b", text):
+            return True
+        return bool(
+            re.search(
+                r"^(?:please\s+)?(?:can you|could you|would you|i need you to|"
+                r"send|draft|write|compose|book|schedule|move|reschedule|cancel|"
+                r"check|find|remind)\b",
+                lowered,
+            )
+        )
 
     def route(self, text: str) -> Route:
         lowered = text.lower()

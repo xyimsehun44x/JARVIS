@@ -1,5 +1,6 @@
 from jarvis import Jarvis
 from jarvis.agents.email.schemas import EmailExecutionResult, EmailProposal
+from jarvis.config import Settings
 
 
 class FailingGmail:
@@ -11,7 +12,7 @@ class FailingGmail:
 
 
 def test_provider_failure_is_not_reported_as_success() -> None:
-    jarvis = Jarvis(gmail=FailingGmail())
+    jarvis = Jarvis(settings=Settings(), gmail=FailingGmail())
     result = jarvis.turn("Email Jisoo and say hello", thread_id="failure")
     result = jarvis.resume("send it", thread_id="failure")
 
@@ -19,4 +20,3 @@ def test_provider_failure_is_not_reported_as_success() -> None:
     assert "OAuth expired" in result.response
     assert result.response != "Sent."
     assert jarvis.state(thread_id="failure")["task_status"] == "failed"
-

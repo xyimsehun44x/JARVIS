@@ -14,6 +14,12 @@ class Settings:
     openai_model: str = "gpt-5.2"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_thinking_level: str = "low"
+    stt_model: str = "base.en"
+    stt_beam_size: int = 1
+    stt_hotwords: str = "Jarvis"
     confirm_drafts: bool = False
     user_name: str | None = None
     timezone: str = "Asia/Seoul"
@@ -39,6 +45,14 @@ class Settings:
             openai_model=os.getenv("JARVIS_OPENAI_MODEL", "gpt-5.2"),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_base_url=os.getenv("JARVIS_OPENAI_BASE_URL") or None,
+            gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
+            gemini_model=os.getenv("JARVIS_GEMINI_MODEL", "gemini-3.8-flash"),
+            gemini_thinking_level=os.getenv(
+                "JARVIS_GEMINI_THINKING_LEVEL", "low"
+            ).lower(),
+            stt_model=os.getenv("JARVIS_STT_MODEL", "base.en"),
+            stt_beam_size=int(os.getenv("JARVIS_STT_BEAM_SIZE", "1")),
+            stt_hotwords=os.getenv("JARVIS_STT_HOTWORDS", "Jarvis"),
             confirm_drafts=os.getenv("JARVIS_CONFIRM_DRAFTS", "false").lower()
             in {"1", "true", "yes", "on"},
             user_name=os.getenv("JARVIS_USER_NAME") or None,
@@ -62,10 +76,16 @@ class Settings:
         errors: list[str] = []
         if self.mode not in {"mock", "google"}:
             errors.append("JARVIS_MODE must be 'mock' or 'google'")
-        if self.llm_provider not in {"rules", "openai"}:
-            errors.append("JARVIS_LLM_PROVIDER must be 'rules' or 'openai'")
+        if self.llm_provider not in {"rules", "openai", "gemini"}:
+            errors.append("JARVIS_LLM_PROVIDER must be 'rules', 'openai', or 'gemini'")
         if self.llm_provider == "openai" and not self.openai_api_key:
             errors.append("OPENAI_API_KEY is required for the OpenAI provider")
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            errors.append("GEMINI_API_KEY is required for the Gemini provider")
+        if self.gemini_thinking_level not in {"low", "medium", "high"}:
+            errors.append("JARVIS_GEMINI_THINKING_LEVEL must be low, medium, or high")
+        if self.stt_beam_size < 1:
+            errors.append("JARVIS_STT_BEAM_SIZE must be at least 1")
         if self.mode == "google" and not Path(self.google_credentials_path).is_file():
             errors.append(
                 f"Google desktop OAuth credentials not found: {self.google_credentials_path}"

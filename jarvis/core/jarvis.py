@@ -17,6 +17,7 @@ from jarvis.agents.email.schemas import EmailProposal, EmailRequest, ResolvedCon
 from jarvis.config import Settings
 from jarvis.core.brain import (
     ConversationModel,
+    GeminiConversationModel,
     OpenAIConversationModel,
     RuleBasedConversationModel,
 )
@@ -138,10 +139,21 @@ class Jarvis:
                 api_key=self.settings.openai_api_key,
                 base_url=self.settings.openai_base_url,
             )
+        if self.settings.llm_provider == "gemini":
+            if not self.settings.gemini_api_key:
+                raise ValueError("GEMINI_API_KEY is required when JARVIS_LLM_PROVIDER=gemini")
+            return GeminiConversationModel(
+                model=self.settings.gemini_model,
+                api_key=self.settings.gemini_api_key,
+                thinking_level=self.settings.gemini_thinking_level,
+            )
         raise ValueError(f"Unsupported language model provider: {self.settings.llm_provider}")
 
     def close(self) -> None:
         self.executions.close()
+        close_brain = getattr(self.brain, "close", None)
+        if close_brain:
+            close_brain()
         close_memory = getattr(self.memory, "close", None)
         if close_memory:
             close_memory()
@@ -195,8 +207,14 @@ class Jarvis:
         history = state.get("messages", [])
         messages: list[dict[str, str]] = [{"role": "user", "content": text}]
         try:
-            classifier = getattr(self.brain, "classify", None)
-            route = Route(classifier(text, history)) if classifier else self.router.route(text)
+            explicit_route = self.router.explicit_route(text)
+            if explicit_route is not None:
+                route = explicit_route
+            elif self.router.may_need_model_routing(text):
+                classifier = getattr(self.brain, "classify", None)
+                route = Route(classifier(text, history)) if classifier else self.router.route(text)
+            else:
+                route = Route.CONVERSATION
         except Exception:
             # A model outage must not turn a potential action into ordinary banter.
             route = self.router.route(text)
@@ -288,25 +306,27 @@ class Jarvis:
         messages: list[dict[str, str]],
     ) -> ResolvedContact | None:
         while not query:
-            query = self._ask(
+            answer = self._ask(
                 messages,
                 kind="clarification",
                 prompt="Who would you like me to email?",
             )
-            if self._is_rejection(query):
+            if self._is_rejection(answer):
                 return None
+            query = self._contact_query_from_answer(answer)
         while True:
             matches = self.email_agent.resolve_contact(query)
             if len(matches) == 1:
                 return matches[0]
             if not matches:
-                query = self._ask(
+                answer = self._ask(
                     messages,
                     kind="clarification",
                     prompt=f"I couldn’t find {query}. What is their full name or email address?",
                 )
-                if self._is_rejection(query):
+                if self._is_rejection(answer):
                     return None
+                query = self._contact_query_from_answer(answer)
                 continue
             choices = " or ".join(f"{item.name} <{item.email}>" for item in matches)
             answer = self._ask(
@@ -319,7 +339,7 @@ class Jarvis:
             selected = self._select_choice(answer, matches)
             if selected:
                 return selected
-            query = answer
+            query = self._contact_query_from_answer(answer)
 
     def _email_workflow(
         self, text: str, messages: list[dict[str, str]]
@@ -696,11 +716,48 @@ class Jarvis:
 
     @staticmethod
     def _select_choice(answer: str, choices: list[ResolvedContact]) -> ResolvedContact | None:
-        lowered = answer.lower()
+        lowered = Jarvis._contact_query_from_answer(answer).lower()
         for index, choice in enumerate(choices, start=1):
             if str(index) == lowered.strip() or choice.name.lower() in lowered or choice.email.lower() in lowered:
                 return choice
         return None
+
+    @staticmethod
+    def _contact_query_from_answer(answer: str) -> str:
+        """Extract a corrected name or email from a natural clarification response."""
+        text = answer.strip()
+        email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
+        if email:
+            return email.group(0)
+
+        spelled = re.search(
+            r"(?<![A-Za-z])([A-Za-z](?:\s*[-.]\s*[A-Za-z]){1,})(?![A-Za-z])",
+            text,
+        )
+        if spelled:
+            return "".join(re.findall(r"[A-Za-z]", spelled.group(1)))
+
+        spaced_letters = re.search(
+            r"(?:^|\s)((?:[A-Za-z]\s+){1,}[A-Za-z])(?:[.!?,]|$)",
+            text,
+        )
+        if spaced_letters:
+            return "".join(spaced_letters.group(1).split())
+
+        cleaned = re.sub(
+            r"^(?:no[,.]?\s+)?(?:i\s+meant(?:\s+(?:to\s+)?say)?|"
+            r"it(?:'s|\s+is)|that(?:'s|\s+is)|the\s+name\s+is|"
+            r"their\s+name\s+is|and\s+then|say|spelled?)\s+",
+            "",
+            text,
+            flags=re.I,
+        ).strip(" \t\r\n.,!?\"'")
+        cleaned = re.sub(r"^(?:to|two|say)\s+(?=\S+$)", "", cleaned, flags=re.I)
+
+        repeated = [part.strip() for part in re.split(r"[,;]", cleaned) if part.strip()]
+        if len(repeated) > 1 and len({part.lower() for part in repeated}) == 1:
+            return repeated[0]
+        return cleaned
 
     @staticmethod
     def _select_event(answer: str, choices: list[CalendarEvent]) -> CalendarEvent | None:

@@ -10,7 +10,7 @@ class KokoroTTS:
             raise RuntimeError("Install the 'voice' extras to use speech synthesis") from exc
         self.sd = sd
         self.voice = voice
-        self.pipeline = KPipeline(lang_code="b")
+        self.pipeline = KPipeline(lang_code="b", repo_id="hexgrad/Kokoro-82M")
 
     def speak(self, text: str) -> None:
         import numpy as np
@@ -18,4 +18,3 @@ class KokoroTTS:
         for _, _, audio in self.pipeline(text, voice=self.voice):
             self.sd.play(np.asarray(audio), samplerate=24000)
             self.sd.wait()
-

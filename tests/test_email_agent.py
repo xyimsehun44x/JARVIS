@@ -1,4 +1,7 @@
 from jarvis import Jarvis
+from jarvis.agents.email.schemas import ResolvedContact
+from jarvis.config import Settings
+from jarvis.integrations.contacts import StaticContactProvider
 
 
 def test_ambiguous_contact_edit_loop_and_verified_send(jarvis: Jarvis) -> None:
@@ -59,3 +62,30 @@ def test_identical_payload_in_separate_tasks_can_be_sent_intentionally(jarvis: J
         assert result.response == "Sent."
 
     assert len(jarvis.gmail.sent) == 2
+
+
+def test_spoken_spelling_correction_is_used_as_contact_query() -> None:
+    jarvis = Jarvis(
+        settings=Settings(),
+        contacts=StaticContactProvider(
+            [ResolvedContact(name="Joo Kim", email="joo@example.com")]
+        ),
+    )
+    result = jarvis.turn("Email June and say hello", thread_id="spelled-contact")
+    assert result.interrupt_kind == "clarification"
+
+    result = jarvis.resume("I meant say J-O-O.", thread_id="spelled-contact")
+
+    assert result.interrupt_kind == "approval"
+    assert "Joo Kim <joo@example.com>" in result.prompt
+    jarvis.close()
+
+
+def test_contact_correction_normalizes_natural_phrasing() -> None:
+    assert Jarvis._contact_query_from_answer("I meant say J-O-O.") == "JOO"
+    assert Jarvis._contact_query_from_answer("and then JOO") == "JOO"
+    assert Jarvis._contact_query_from_answer("Jew, Jew.") == "Jew"
+    assert (
+        Jarvis._contact_query_from_answer("Actually use joo@example.com")
+        == "joo@example.com"
+    )
