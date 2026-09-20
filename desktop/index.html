@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#07131d" />
+    <title>Jarvis</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div class="identity">
+          <div class="orb" id="orb" aria-hidden="true"><span></span></div>
+          <div>
+            <p class="eyebrow">Personal intelligence</p>
+            <h1>Jarvis</h1>
+          </div>
+        </div>
+        <div class="masthead-actions">
+          <div class="status" id="status"><i></i><span>Starting backend</span></div>
+          <button
+            class="settings-toggle"
+            id="settings-toggle"
+            type="button"
+            aria-label="Open settings and diagnostics"
+            aria-controls="settings-panel"
+            aria-expanded="false"
+            title="Settings and diagnostics"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-1.55-1.03H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63a1.7 1.7 0 0 0 1.03-1.55V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9a1.7 1.7 0 0 0 1.55 1.03H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <section
+        class="settings-panel"
+        id="settings-panel"
+        aria-labelledby="settings-title"
+        hidden
+      >
+        <div class="settings-heading">
+          <div>
+            <p class="eyebrow">Desktop control</p>
+            <h2 id="settings-title">Settings &amp; diagnostics</h2>
+          </div>
+          <button
+            class="settings-close"
+            id="settings-close"
+            type="button"
+            aria-label="Close settings"
+          >
+            &times;
+          </button>
+        </div>
+
+        <div class="diagnostics" aria-label="Runtime diagnostics">
+          <div><span>Backend</span><strong id="diagnostic-backend">Starting</strong></div>
+          <div><span>Mode</span><strong id="diagnostic-mode">Waiting</strong></div>
+          <div><span>AI provider</span><strong id="diagnostic-provider">Waiting</strong></div>
+          <div><span>Voice</span><strong id="diagnostic-voice">Loading</strong></div>
+          <div><span>Email sending</span><strong id="diagnostic-email">Waiting</strong></div>
+          <div><span>Calendar writes</span><strong id="diagnostic-calendar">Waiting</strong></div>
+        </div>
+
+        <form class="shortcut-form" id="shortcut-form">
+          <label for="shortcut-input">Global show/hide shortcut</label>
+          <div class="shortcut-control">
+            <input
+              id="shortcut-input"
+              name="shortcut"
+              type="text"
+              maxlength="64"
+              placeholder="Ctrl+Alt+J"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="primary" id="shortcut-save" type="submit">Save</button>
+          </div>
+          <p class="shortcut-current" id="shortcut-current">Loading shortcut...</p>
+          <p class="settings-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+        </form>
+
+        <p class="settings-privacy">
+          Only the desktop shortcut is stored here. Credentials, conversations, and
+          approval payloads are never written to desktop preferences. Safety locks are
+          read-only in this panel.
+        </p>
+      </section>
+
+      <section class="conversation" id="conversation" aria-live="polite">
+        <div class="empty-state" id="empty-state">
+          <p>Systems are coming online.</p>
+          <span>Your conversation will appear here.</span>
+        </div>
+      </section>
+
+      <section class="approval" id="approval" hidden>
+        <div>
+          <p class="eyebrow">Approval required</p>
+          <p id="approval-summary"></p>
+          <pre id="approval-payload"></pre>
+        </div>
+        <div class="approval-actions">
+          <button class="secondary" id="reject" type="button">Cancel</button>
+          <button class="primary" id="approve" type="button">Approve</button>
+        </div>
+      </section>
+
+      <form class="composer" id="composer">
+        <label class="sr-only" for="message">Message Jarvis</label>
+        <button
+          class="microphone"
+          id="microphone"
+          type="button"
+          aria-label="Start voice input"
+          aria-pressed="false"
+          title="Voice input is loading"
+          disabled
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="3" width="6" height="11" rx="3" />
+            <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M9 21h6" />
+          </svg>
+        </button>
+        <textarea
+          id="message"
+          rows="1"
+          placeholder="Ask Jarvis anything..."
+          autocomplete="off"
+        ></textarea>
+        <button class="send" id="send" type="submit" aria-label="Send message">
+          <span>Send</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m5 12 14-7-4 14-3-6-7-1Z" />
+          </svg>
+        </button>
+      </form>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

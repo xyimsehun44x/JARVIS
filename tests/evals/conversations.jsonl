@@ -1,6 +1,5 @@
-{"input":"Jarvis, tell me something interesting.","route":"conversation"}
-{"input":"I think I completely screwed up that interview.","route":"conversation"}
-{"input":"Email David a quick update.","route":"email","expects":"clarification"}
-{"input":"What's tomorrow looking like?","route":"calendar"}
-{"input":"Find when I'm free next week and email David two options.","route":"cross_domain"}
-
+{"id":"interesting-banter","input":"Jarvis, tell me something interesting.","route":"conversation","expect":{"needs_input":false,"response_contains":["Octopuses"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"emotional-conversation","input":"I think I completely screwed up that interview.","route":"conversation","expect":{"needs_input":false,"response_contains":["listening"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"email-route-with-ambiguity","input":"Email David a quick update.","route":"email","expect":{"interrupt":"clarification","prompt_contains":["David Kim","David Lee"],"proposal_absent":true},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"calendar-read-route","input":"What's tomorrow looking like?","route":"calendar","expect":{"needs_input":false,"response_contains":["3 events","Dinner with Minho"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"cross-domain-route","input":"Find when I'm free next week and email David two options.","route":"cross_domain","expect":{"interrupt":"clarification","prompt_contains":["David Kim","David Lee"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}

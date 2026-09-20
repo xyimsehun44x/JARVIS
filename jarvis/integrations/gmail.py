@@ -39,6 +39,9 @@ class GoogleGmailProvider:
     def save_draft(self, proposal: EmailProposal) -> EmailExecutionResult:
         try:
             service = self.oauth.service("gmail", "v1")
+        except Exception as exc:
+            return EmailExecutionResult(ok=False, operation="save_draft", error=str(exc))
+        try:
             result = (
                 service.users()
                 .drafts()
@@ -48,8 +51,19 @@ class GoogleGmailProvider:
             draft_id = result.get("id")
             if not draft_id:
                 return EmailExecutionResult(
-                    ok=False, operation="save_draft", error="Gmail returned no draft ID"
+                    ok=False,
+                    operation="save_draft",
+                    outcome_uncertain=True,
+                    error="Gmail accepted the draft request but returned no draft ID",
                 )
+        except Exception as exc:
+            return EmailExecutionResult(
+                ok=False,
+                operation="save_draft",
+                outcome_uncertain=True,
+                error=f"Gmail draft creation ended without a verified outcome: {exc}",
+            )
+        try:
             verified = (
                 service.users()
                 .drafts()
@@ -57,10 +71,24 @@ class GoogleGmailProvider:
                 .execute()
             )
             return EmailExecutionResult(
-                ok=bool(verified.get("id")), operation="save_draft", draft_id=draft_id
+                ok=verified.get("id") == draft_id,
+                operation="save_draft",
+                draft_id=draft_id,
+                outcome_uncertain=verified.get("id") != draft_id,
+                error=(
+                    None
+                    if verified.get("id") == draft_id
+                    else "Gmail draft verification did not match the created draft"
+                ),
             )
         except Exception as exc:
-            return EmailExecutionResult(ok=False, operation="save_draft", error=str(exc))
+            return EmailExecutionResult(
+                ok=False,
+                operation="save_draft",
+                draft_id=draft_id,
+                outcome_uncertain=True,
+                error=f"Gmail created the draft but verification failed: {exc}",
+            )
 
     def send(self, proposal: EmailProposal) -> EmailExecutionResult:
         if not self.allow_send:
@@ -71,6 +99,9 @@ class GoogleGmailProvider:
             )
         try:
             service = self.oauth.service("gmail", "v1")
+        except Exception as exc:
+            return EmailExecutionResult(ok=False, operation="send", error=str(exc))
+        try:
             result = (
                 service.users()
                 .messages()
@@ -80,8 +111,19 @@ class GoogleGmailProvider:
             message_id = result.get("id")
             if not message_id:
                 return EmailExecutionResult(
-                    ok=False, operation="send", error="Gmail returned no message ID"
+                    ok=False,
+                    operation="send",
+                    outcome_uncertain=True,
+                    error="Gmail accepted the send request but returned no message ID",
                 )
+        except Exception as exc:
+            return EmailExecutionResult(
+                ok=False,
+                operation="send",
+                outcome_uncertain=True,
+                error=f"Gmail send ended without a verified outcome: {exc}",
+            )
+        try:
             verified = (
                 service.users()
                 .messages()
@@ -89,10 +131,24 @@ class GoogleGmailProvider:
                 .execute()
             )
             return EmailExecutionResult(
-                ok=bool(verified.get("id")), operation="send", message_id=message_id
+                ok=verified.get("id") == message_id,
+                operation="send",
+                message_id=message_id,
+                outcome_uncertain=verified.get("id") != message_id,
+                error=(
+                    None
+                    if verified.get("id") == message_id
+                    else "Gmail verification did not match the sent message"
+                ),
             )
         except Exception as exc:
-            return EmailExecutionResult(ok=False, operation="send", error=str(exc))
+            return EmailExecutionResult(
+                ok=False,
+                operation="send",
+                message_id=message_id,
+                outcome_uncertain=True,
+                error=f"Gmail accepted the message but verification failed: {exc}",
+            )
 
     @staticmethod
     def _raw(proposal: EmailProposal) -> str:

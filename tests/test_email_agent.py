@@ -4,6 +4,17 @@ from jarvis.config import Settings
 from jarvis.integrations.contacts import StaticContactProvider
 
 
+def test_email_operation_language_is_fail_closed(jarvis: Jarvis) -> None:
+    parse = jarvis.email_agent.request_from_text
+
+    assert parse("Write an email to Jisoo").operation == "prepare"
+    assert parse("Draft an email to Jisoo").operation == "prepare"
+    assert parse("Write an email to Jisoo but don't send it").operation == "prepare"
+    assert parse("Email Jisoo and save it as a draft").operation == "save_draft"
+    assert parse("Send an email to Jisoo").operation == "send"
+    assert parse("Write and send an email to Jisoo").operation == "send"
+
+
 def test_ambiguous_contact_edit_loop_and_verified_send(jarvis: Jarvis) -> None:
     result = jarvis.turn(
         "Email David and tell him I need to move next week's meeting for family reasons.",
@@ -40,12 +51,48 @@ def test_rejection_performs_no_external_write(jarvis: Jarvis) -> None:
     assert jarvis.gmail.sent == []
 
 
-def test_draft_save_is_reversible_and_mocked(jarvis: Jarvis) -> None:
+def test_draft_language_prepares_without_writing_until_save_is_explicit(jarvis: Jarvis) -> None:
     result = jarvis.turn("Draft an email to Jisoo saying hello", thread_id="draft")
+
+    assert result.interrupt_kind == "email_proposal"
+    assert "Nothing has been sent or saved" in result.prompt
+    assert jarvis.gmail.drafts == []
+    assert jarvis.gmail.sent == []
+
+    result = jarvis.resume("Save it as a draft", thread_id="draft")
 
     assert result.response == "Draft saved."
     assert len(jarvis.gmail.drafts) == 1
     assert not result.needs_input
+
+
+def test_write_language_requires_explicit_send_and_exact_approval(jarvis: Jarvis) -> None:
+    result = jarvis.turn("Write an email to Jisoo saying hello", thread_id="write-email")
+
+    assert result.interrupt_kind == "email_proposal"
+    assert jarvis.gmail.sent == []
+
+    result = jarvis.resume("Send it", thread_id="write-email")
+
+    assert result.interrupt_kind == "approval"
+    assert "Shall I send?" in result.prompt
+    assert jarvis.gmail.sent == []
+
+    result = jarvis.resume("Yes", thread_id="write-email")
+
+    assert result.response == "Sent."
+    assert len(jarvis.gmail.sent) == 1
+
+
+def test_explicit_save_as_draft_performs_only_draft_write(jarvis: Jarvis) -> None:
+    result = jarvis.turn(
+        "Email Jisoo saying hello and save it as a draft",
+        thread_id="explicit-draft-save",
+    )
+
+    assert result.response == "Draft saved."
+    assert len(jarvis.gmail.drafts) == 1
+    assert jarvis.gmail.sent == []
 
 
 def test_lowercase_transcript_recipient_is_resolved(jarvis: Jarvis) -> None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from jarvis import Jarvis
+from jarvis.config import Settings
+from jarvis.integrations.calendar import MockCalendarProvider
 
 
 def test_schedule_read_then_contextual_move(jarvis: Jarvis) -> None:
@@ -49,8 +51,37 @@ def test_cancel_rejection_leaves_event_untouched(jarvis: Jarvis) -> None:
     assert any(event.event_id == "event-dinner" for event in jarvis.calendar.events)
 
 
+def test_cancel_approval_executes_and_verifies_removal(jarvis: Jarvis) -> None:
+    result = jarvis.turn("Cancel the dinner", thread_id="cancel-approved")
+    assert result.interrupt_kind == "approval"
+    assert any(event.event_id == "event-dinner" for event in jarvis.calendar.events)
+
+    result = jarvis.resume("yes", thread_id="cancel-approved")
+
+    assert "has been cancelled" in result.response
+    assert not any(event.event_id == "event-dinner" for event in jarvis.calendar.events)
+
+
 def test_read_only_free_time_needs_no_approval(jarvis: Jarvis) -> None:
     result = jarvis.turn("When am I free next week?", thread_id="free")
     assert not result.needs_input
     assert "You’re free" in result.response
 
+
+def test_free_tomorrow_checks_only_tomorrow(monkeypatch) -> None:
+    fixed_today = date(2026, 9, 7)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return fixed_today
+
+    monkeypatch.setattr("jarvis.core.jarvis.date", FixedDate)
+    calendar = MockCalendarProvider(events=[], today=fixed_today)
+    assistant = Jarvis(settings=Settings(), calendar=calendar)
+
+    result = assistant.turn("When am I free tomorrow?", thread_id="free-tomorrow")
+
+    assert "Tuesday" in result.response
+    assert "Monday" not in result.response
+    assistant.close()

@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from threading import RLock
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -19,7 +19,15 @@ class ExecutionRecord(BaseModel):
     approved_payload_hash: str
     tool_name: str
     external_resource_id: str | None = None
-    status: str
+    status: Literal["executing", "verified", "failed", "uncertain"]
+    result: dict[str, Any] | None = None
+
+
+class RecoveryDecision(BaseModel):
+    """Result of checking an interrupted operation against its external provider."""
+
+    outcome: Literal["verified", "failed", "retry", "uncertain"]
+    external_resource_id: str | None = None
     result: dict[str, Any] | None = None
 
 
@@ -63,6 +71,8 @@ class ExecutionRegistry:
         self,
         action: ProposedAction,
         operation: Callable[[], dict[str, Any]],
+        *,
+        recover: Callable[[ExecutionRecord], RecoveryDecision] | None = None,
     ) -> ExecutionRecord:
         digest = payload_hash(action)
         with self._lock:
@@ -70,26 +80,87 @@ class ExecutionRegistry:
             if previous and previous.status == "verified":
                 return previous
 
-            record = ExecutionRecord(
-                execution_id=str(uuid4()),
-                approved_payload_hash=digest,
-                tool_name=action.tool_name,
-                status="executing",
-            )
-            self._save(record)
+            if previous and previous.status in {"executing", "uncertain"}:
+                try:
+                    decision = recover(previous) if recover else None
+                except Exception as exc:
+                    decision = RecoveryDecision(
+                        outcome="uncertain",
+                        external_resource_id=previous.external_resource_id,
+                        result={
+                            "ok": False,
+                            "outcome_uncertain": True,
+                            "error": f"External reconciliation failed: {exc}",
+                        },
+                    )
+                if decision is None or decision.outcome == "uncertain":
+                    return self._mark_uncertain(previous, decision)
+                if decision.outcome != "retry":
+                    previous.status = decision.outcome
+                    if decision.external_resource_id:
+                        previous.external_resource_id = decision.external_resource_id
+                    previous.result = decision.result
+                    self._save(previous)
+                    return previous
+                record = previous
+                record.status = "executing"
+                record.result = None
+                self._save(record)
+            else:
+                record = ExecutionRecord(
+                    execution_id=str(uuid4()),
+                    approved_payload_hash=digest,
+                    tool_name=action.tool_name,
+                    status="executing",
+                )
+                self._save(record)
+
             try:
                 result = operation()
                 ok = bool(result.get("ok"))
-                record.status = "verified" if ok else "failed"
+                if ok:
+                    record.status = "verified"
+                elif result.get("outcome_uncertain"):
+                    record.status = "uncertain"
+                else:
+                    record.status = "failed"
                 record.external_resource_id = (
                     result.get("message_id") or result.get("draft_id") or result.get("event_id")
                 )
                 record.result = result
             except Exception as exc:  # providers are an explicit failure boundary
-                record.status = "failed"
-                record.result = {"ok": False, "error": str(exc)}
+                record.status = "uncertain"
+                record.result = {
+                    "ok": False,
+                    "outcome_uncertain": True,
+                    "error": (
+                        f"The {action.tool_name} call ended without a verified outcome: {exc}"
+                    ),
+                }
             self._save(record)
             return record
+
+    def _mark_uncertain(
+        self,
+        record: ExecutionRecord,
+        decision: RecoveryDecision | None = None,
+    ) -> ExecutionRecord:
+        record.status = "uncertain"
+        if decision and decision.external_resource_id:
+            record.external_resource_id = decision.external_resource_id
+        if decision and decision.result:
+            record.result = decision.result
+        elif not record.result:
+            record.result = {
+                "ok": False,
+                "outcome_uncertain": True,
+                "error": (
+                    "A previous execution stopped before its result was verified. "
+                    "Jarvis will not retry it until the external service is reconciled."
+                ),
+            }
+        self._save(record)
+        return record
 
     def close(self) -> None:
         if self._connection:

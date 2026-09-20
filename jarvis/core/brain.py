@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel
 
-from jarvis.core.prompts import JARVIS_PERSONA
+from jarvis.core.prompts import JARVIS_PERSONA, JARVIS_STREAMING_VOICE_PERSONA
 
 
 class ConversationModel(Protocol):
@@ -168,6 +169,116 @@ class GeminiConversationModel:
         if not output:
             raise RuntimeError("Gemini returned an empty response")
         return output
+
+    def respond_stream(
+        self,
+        text: str,
+        history: list[dict[str, str]],
+        *,
+        voice_mode: bool = True,
+    ) -> Iterator[str]:
+        """Yield only model text deltas from a Gemini interaction stream."""
+        events = self.client.interactions.create(
+            model=self.model,
+            system_instruction=(
+                JARVIS_STREAMING_VOICE_PERSONA if voice_mode else JARVIS_PERSONA
+            ),
+            input=self._conversation_input(text, history),
+            generation_config={
+                "thinking_level": self.thinking_level,
+                "max_output_tokens": 320 if voice_mode else 160,
+            },
+            store=False,
+            stream=True,
+        )
+        completed = False
+        streamed_text = ""
+        try:
+            for event in events:
+                event_type = getattr(event, "event_type", None)
+                if event_type == "error":
+                    raise RuntimeError("Gemini streaming response failed")
+                if event_type == "interaction.completed":
+                    interaction = getattr(event, "interaction", None)
+                    status = getattr(interaction, "status", None)
+                    if status != "completed":
+                        raise RuntimeError(
+                            "Gemini streaming response ended with status "
+                            f"{status or 'unknown'}"
+                        )
+                    final_text = self._interaction_output_text(interaction)
+                    if final_text and final_text != streamed_text:
+                        if not final_text.startswith(streamed_text):
+                            raise RuntimeError(
+                                "Gemini completed output did not match streamed text"
+                            )
+                        missing_suffix = final_text[len(streamed_text) :]
+                        if missing_suffix:
+                            streamed_text += missing_suffix
+                            yield missing_suffix
+                    completed = True
+                    continue
+                if event_type != "step.delta":
+                    continue
+                delta = getattr(event, "delta", None)
+                if getattr(delta, "type", None) != "text":
+                    continue
+                chunk = getattr(delta, "text", "")
+                if chunk:
+                    streamed_text += chunk
+                    yield chunk
+            if not completed:
+                raise RuntimeError(
+                    "Gemini streaming response ended before completion"
+                )
+        finally:
+            close = getattr(events, "close", None)
+            if close:
+                close()
+
+    @classmethod
+    def _interaction_output_text(cls, interaction: Any) -> str:
+        """Extract the SDK's final model text from a lifecycle interaction payload."""
+        direct = cls._value(interaction, "output_text")
+        if isinstance(direct, str) and direct:
+            return direct
+        steps = cls._value(interaction, "steps")
+        if not isinstance(steps, list):
+            return ""
+
+        text_parts: list[str] = []
+        collecting = False
+        for step in reversed(steps):
+            step_type = cls._value(step, "type")
+            if step_type == "user_input":
+                break
+            if step_type != "model_output":
+                if collecting:
+                    break
+                continue
+            content = cls._value(step, "content")
+            if not isinstance(content, list):
+                if collecting:
+                    break
+                continue
+            should_stop = False
+            for item in reversed(content):
+                if cls._value(item, "type") == "text":
+                    collecting = True
+                    text = cls._value(item, "text")
+                    text_parts.append(text if isinstance(text, str) else "")
+                elif collecting:
+                    should_stop = True
+                    break
+            if should_stop:
+                break
+        return "".join(reversed(text_parts))
+
+    @staticmethod
+    def _value(value: Any, name: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(name)
+        return getattr(value, name, None)
 
     def classify(self, text: str, history: list[dict[str, str]]) -> str:
         parsed = self._structured(

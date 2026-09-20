@@ -41,5 +41,5 @@ class CalendarProposal(BaseModel):
 class CalendarExecutionResult(BaseModel):
     ok: bool
     event_id: str | None = None
+    outcome_uncertain: bool = False
     error: str | None = None
-

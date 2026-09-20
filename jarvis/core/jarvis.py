@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
 from contextvars import ContextVar
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from langgraph.types import Command, interrupt
 
@@ -15,6 +17,7 @@ from jarvis.agents.calendar.schemas import CalendarEvent, CalendarProposal
 from jarvis.agents.email.agent import EmailAgent
 from jarvis.agents.email.schemas import EmailProposal, EmailRequest, ResolvedContact
 from jarvis.config import Settings
+from jarvis.core.artifacts import TaskArtifactStore
 from jarvis.core.brain import (
     ConversationModel,
     GeminiConversationModel,
@@ -23,17 +26,29 @@ from jarvis.core.brain import (
 )
 from jarvis.core.execution import ExecutionRecord, ExecutionRegistry
 from jarvis.core.graph import build_graph
+from jarvis.core.latency import LatencyRecorder
 from jarvis.core.permissions import PermissionPolicy, ProposedAction, RiskLevel
 from jarvis.core.router import Route, Router
 from jarvis.core.state import JarvisState
 from jarvis.integrations.calendar import CalendarProvider, MockCalendarProvider
 from jarvis.integrations.contacts import ContactProvider, StaticContactProvider
 from jarvis.integrations.gmail import GmailProvider, MockGmailProvider
+from jarvis.integrations.weather import (
+    MockWeatherProvider,
+    OpenMeteoWeatherProvider,
+    WeatherLocationNotFound,
+    WeatherProvider,
+    WeatherProviderError,
+    WeatherRequest,
+    WeatherResult,
+    WeatherTimeoutError,
+)
 from jarvis.memory.long_term import InMemoryLongTermMemory, SQLiteLongTermMemory
 
 
 APPROVE_WORDS = ("yes", "approve", "send it", "do it", "go ahead", "confirm", "perfect")
 REJECT_WORDS = ("no", "reject", "cancel", "never mind", "nevermind", "forget it", "stop")
+INCOMPLETE_VOICE_RESPONSE = "I lost the end of that response. Please ask me again."
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -53,6 +68,10 @@ class TurnResult:
     interrupt_kind: str | None = None
     proposal: dict[str, Any] | None = None
     state: dict[str, Any] | None = None
+    trace_id: str | None = None
+    execution_tier: int | None = None
+    tier_reason: str | None = None
+    response_streamed: bool = False
 
 
 class Jarvis:
@@ -65,11 +84,16 @@ class Jarvis:
         contacts: ContactProvider | None = None,
         gmail: GmailProvider | None = None,
         calendar: CalendarProvider | None = None,
+        weather: WeatherProvider | None = None,
         conversation_model: ConversationModel | None = None,
         checkpointer=None,
         execution_registry: ExecutionRegistry | None = None,
+        latency_recorder: LatencyRecorder | None = None,
     ) -> None:
         self.settings = settings or Settings.from_env()
+        self.latency = latency_recorder or LatencyRecorder(
+            enabled=self.settings.latency_logging
+        )
         self._checkpoint_connection: sqlite3.Connection | None = None
         self.google_oauth = None
         self.brain = conversation_model or self._build_language_model()
@@ -95,11 +119,15 @@ class Jarvis:
                     timezone_name=self.settings.timezone,
                     allow_writes=self.settings.allow_calendar_writes,
                 )
+            weather = weather or OpenMeteoWeatherProvider(
+                timeout_seconds=self.settings.weather_timeout_seconds
+            )
         elif self.settings.mode != "mock":
             raise ValueError("JARVIS_MODE must be 'mock' or 'google'")
 
         self.gmail = gmail or MockGmailProvider()
         self.calendar = calendar or MockCalendarProvider()
+        self.weather = weather or MockWeatherProvider()
         self.email_agent = EmailAgent(
             contacts or StaticContactProvider(), language_model=self.brain
         )
@@ -115,6 +143,7 @@ class Jarvis:
             else InMemoryLongTermMemory()
         )
         self.executions = execution_registry or ExecutionRegistry(database_path)
+        self.artifacts = TaskArtifactStore(database_path)
         if checkpointer is None and database_path:
             from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -151,6 +180,7 @@ class Jarvis:
 
     def close(self) -> None:
         self.executions.close()
+        self.artifacts.close()
         close_brain = getattr(self.brain, "close", None)
         if close_brain:
             close_brain()
@@ -161,31 +191,171 @@ class Jarvis:
             self._checkpoint_connection.close()
             self._checkpoint_connection = None
 
-    def turn(self, text: str, *, thread_id: str = "default") -> TurnResult:
+    def turn(
+        self,
+        text: str,
+        *,
+        thread_id: str = "default",
+        trace_id: str | None = None,
+    ) -> TurnResult:
+        trace_id = trace_id or self.latency.current_trace_id or str(uuid4())
         if thread_id in self._interrupted_threads or self._has_pending_interrupt(thread_id):
-            return self.resume(text, thread_id=thread_id)
-        result = self.app.invoke(
-            {"latest_user_text": text, "task_id": str(uuid4())},
-            config={"configurable": {"thread_id": thread_id}},
-        )
-        return self._result(result, thread_id)
+            return self.resume(text, thread_id=thread_id, trace_id=trace_id)
+        with self.latency.trace(trace_id, thread_id=thread_id):
+            with self.latency.measure("turn.total"):
+                result = self.app.invoke(
+                    {"latest_user_text": text, "task_id": str(uuid4())},
+                    config={"configurable": {"thread_id": thread_id}},
+                )
+        return self._result(result, thread_id, trace_id)
 
-    def resume(self, text: str, *, thread_id: str = "default") -> TurnResult:
-        result = self.app.invoke(
-            Command(resume=text),
-            config={"configurable": {"thread_id": thread_id}},
-        )
-        return self._result(result, thread_id)
+    def resume(
+        self,
+        text: str,
+        *,
+        thread_id: str = "default",
+        trace_id: str | None = None,
+    ) -> TurnResult:
+        trace_id = trace_id or self.latency.current_trace_id or str(uuid4())
+        with self.latency.trace(trace_id, thread_id=thread_id):
+            with self.latency.measure("turn.total"):
+                result = self.app.invoke(
+                    Command(resume=text),
+                    config={"configurable": {"thread_id": thread_id}},
+                )
+        return self._result(result, thread_id, trace_id)
 
     def state(self, *, thread_id: str = "default") -> dict[str, Any]:
         snapshot = self.app.get_state({"configurable": {"thread_id": thread_id}})
         return dict(snapshot.values) if snapshot else {}
 
+    def has_pending_input(self, thread_id: str = "default") -> bool:
+        return thread_id in self._interrupted_threads or self._has_pending_interrupt(thread_id)
+
+    def direct_conversation(
+        self,
+        text: str,
+        *,
+        thread_id: str = "default",
+        trace_id: str | None = None,
+        on_response_delta: Callable[[str], None] | None = None,
+        voice_response: bool = False,
+    ) -> TurnResult:
+        """Run one Tier-1 model call and persist it into the shared graph thread."""
+        if self.has_pending_input(thread_id):
+            raise RuntimeError("Cannot bypass a task that is waiting for user input")
+        trace_id = trace_id or self.latency.current_trace_id or str(uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        with self.latency.trace(trace_id, thread_id=thread_id):
+            with self.latency.measure("turn.total"):
+                history = self.state(thread_id=thread_id).get("messages", [])
+                with self.latency.measure("llm.respond"):
+                    response, response_streamed = self._conversation_response(
+                        text, history, on_response_delta, voice_response=voice_response
+                    )
+                update = self._complete(
+                    [{"role": "user", "content": text}], response, str(uuid4())
+                )
+                self.app.update_state(config, update, as_node="jarvis_core")
+                state = self.state(thread_id=thread_id)
+        return TurnResult(
+            response=response,
+            state=state,
+            trace_id=trace_id,
+            response_streamed=response_streamed,
+        )
+
+    def _conversation_response(
+        self,
+        text: str,
+        history: list[dict[str, str]],
+        on_response_delta: Callable[[str], None] | None,
+        *,
+        voice_response: bool,
+    ) -> tuple[str, bool]:
+        stream = getattr(self.brain, "respond_stream", None)
+        if on_response_delta is None or not callable(stream):
+            return self.brain.respond(text, history), False
+
+        started = self.latency.now()
+        chunks: list[str] = []
+        try:
+            for chunk in stream(text, history, voice_mode=voice_response):
+                if not chunk:
+                    continue
+                if not chunks:
+                    self.latency.record_elapsed("llm.first_token", started)
+                chunks.append(chunk)
+                on_response_delta(chunk)
+        except Exception:
+            if not chunks:
+                self.latency.record("llm.stream_fallback", 0.0)
+                return self.brain.respond(text, history), False
+            # Never make a second model call after output may already have been spoken.
+            self.latency.record("llm.stream_interrupted", 0.0)
+
+        response = "".join(chunks).strip()
+        if not response:
+            self.latency.record("llm.stream_fallback", 0.0)
+            return self.brain.respond(text, history), False
+        response, trimmed = self._trim_dangling_fragment(response)
+        if trimmed:
+            self.latency.record("llm.incomplete_tail_trimmed", 0.0)
+        if voice_response and not self._has_terminal_punctuation(response):
+            self.latency.record("llm.incomplete_response_rejected", 0.0)
+            return INCOMPLETE_VOICE_RESPONSE, False
+        return response, True
+
+    @staticmethod
+    def _has_terminal_punctuation(response: str) -> bool:
+        return bool(re.search(r"[.!?][\"'\u2019\u201d)]*$", response.strip()))
+
+    @staticmethod
+    def _trim_dangling_fragment(response: str) -> tuple[str, bool]:
+        """Drop a trailing fragment only when a complete sentence precedes it."""
+        stripped = response.strip()
+        if Jarvis._has_terminal_punctuation(stripped):
+            return stripped, False
+        sentences = list(
+            re.finditer(r"[.!?][\"'\u2019\u201d)]*(?=\s|$)", stripped)
+        )
+        if not sentences:
+            return stripped, False
+        complete = stripped[: sentences[-1].end()].strip()
+        return complete, complete != stripped
+
+    def select_route(
+        self, text: str, history: list[dict[str, str]] | None = None
+    ) -> Route:
+        """Select an execution route without performing the requested action."""
+        conversation = history or []
+        try:
+            explicit_route = self.router.explicit_route(text)
+            if explicit_route is not None:
+                return explicit_route
+            if self.router.may_need_model_routing(text):
+                classifier = getattr(self.brain, "classify", None)
+                if classifier:
+                    with self.latency.measure("llm.classify"):
+                        return Route(classifier(text, conversation))
+                return self.router.route(text)
+            return Route.CONVERSATION
+        except Exception:
+            # A model outage must not turn a potential action into ordinary banter.
+            return self.router.route(text)
+
+    def is_weather_followup(self, text: str, thread_id: str = "default") -> bool:
+        """Recognize a narrow temporal follow-up only after a weather response."""
+        state = self.state(thread_id=thread_id)
+        return self._is_weather_followup(text, state)
+
     def _has_pending_interrupt(self, thread_id: str) -> bool:
         snapshot = self.app.get_state({"configurable": {"thread_id": thread_id}})
         return bool(snapshot and any(task.interrupts for task in snapshot.tasks))
 
-    def _result(self, result: dict[str, Any], thread_id: str) -> TurnResult:
+    def _result(
+        self, result: dict[str, Any], thread_id: str, trace_id: str
+    ) -> TurnResult:
         interruptions = result.get("__interrupt__", ())
         if interruptions:
             self._interrupted_threads.add(thread_id)
@@ -198,26 +368,21 @@ class Jarvis:
                 interrupt_kind=value.get("kind"),
                 proposal=value.get("action"),
                 state=result,
+                trace_id=trace_id,
             )
         self._interrupted_threads.discard(thread_id)
-        return TurnResult(response=result.get("response_text"), state=result)
+        return TurnResult(response=result.get("response_text"), state=result, trace_id=trace_id)
 
     def _run_turn(self, state: JarvisState) -> dict[str, Any]:
         text = state.get("latest_user_text", "").strip()
         history = state.get("messages", [])
         messages: list[dict[str, str]] = [{"role": "user", "content": text}]
-        try:
-            explicit_route = self.router.explicit_route(text)
-            if explicit_route is not None:
-                route = explicit_route
-            elif self.router.may_need_model_routing(text):
-                classifier = getattr(self.brain, "classify", None)
-                route = Route(classifier(text, history)) if classifier else self.router.route(text)
-            else:
-                route = Route.CONVERSATION
-        except Exception:
-            # A model outage must not turn a potential action into ordinary banter.
-            route = self.router.route(text)
+        with self.latency.measure("routing"):
+            route = (
+                Route.WEATHER
+                if self._is_weather_followup(text, state)
+                else self.select_route(text, history)
+            )
         task_id = state.get("task_id") or str(uuid4())
         self._task_context.set(task_id)
 
@@ -226,7 +391,8 @@ class Jarvis:
             return self._complete(messages, response, task_id)
 
         if route is Route.CONVERSATION:
-            response = self.brain.respond(text, history)
+            with self.latency.measure("llm.respond"):
+                response = self.brain.respond(text, history)
             return self._complete(messages, response, task_id)
 
         if route is Route.EMAIL:
@@ -236,6 +402,23 @@ class Jarvis:
         if route is Route.CROSS_DOMAIN:
             response, execution = self._availability_email_workflow(text, messages)
             return self._complete(messages, response, task_id, "email+calendar", execution=execution)
+
+        if route is Route.WEATHER:
+            response, weather_context = self._weather_workflow(text, state, messages)
+            return self._complete(
+                messages,
+                response,
+                task_id,
+                "weather",
+                weather_context=weather_context,
+            )
+
+        if route is Route.UNSUPPORTED_FRESH_DATA:
+            response = (
+                "I don't have a verified live source for that yet, so I won't guess. "
+                "I can currently check weather, Google Calendar, Gmail, and Contacts."
+            )
+            return self._complete(messages, response, task_id, "unsupported_fresh_data")
 
         response, recent_events, execution = self._calendar_workflow(text, state, messages)
         return self._complete(
@@ -256,6 +439,7 @@ class Jarvis:
         *,
         recent_events: list[dict[str, Any]] | None = None,
         execution: ExecutionRecord | None = None,
+        weather_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         messages.append({"role": "assistant", "content": response})
         update: dict[str, Any] = {
@@ -263,6 +447,7 @@ class Jarvis:
             "task_id": task_id,
             "task_status": "completed",
             "active_domain": None,
+            "last_domain": domain or "conversation",
             "task_summary": None,
             "delegated_task": None,
             "agent_result": None,
@@ -273,12 +458,147 @@ class Jarvis:
         }
         if recent_events is not None:
             update["recent_events"] = recent_events
+        if domain == "weather" or weather_context is not None:
+            update["weather_context"] = weather_context
         if execution is not None:
             update["execution_id"] = execution.execution_id
             update["execution_result"] = execution.result
             if execution.status != "verified":
                 update["task_status"] = "failed"
         return update
+
+    def _weather_workflow(
+        self,
+        text: str,
+        state: JarvisState,
+        messages: list[dict[str, str]],
+    ) -> tuple[str, dict[str, Any] | None]:
+        prior_context = state.get("weather_context") or {}
+        location = self._weather_location_from_text(text)
+        if not location and state.get("last_domain") == "weather":
+            location = prior_context.get("location")
+        location = location or self.settings.default_location
+        if not location:
+            answer = self._ask(
+                messages,
+                kind="clarification",
+                prompt="Which location should I check the weather for?",
+            )
+            if self._is_rejection(answer):
+                return "Very well. I haven't checked the weather.", None
+            location = self._clean_location_answer(answer)
+        if not location:
+            return "I couldn't establish a location, so I haven't guessed.", None
+
+        target_date = self._weather_date_from_text(text)
+        request = WeatherRequest(location=location, target_date=target_date)
+        try:
+            with self.latency.measure("tool.weather.read"):
+                result = self.weather.get_weather(request)
+        except WeatherLocationNotFound:
+            return (
+                f"I couldn't find a weather location matching {location}. "
+                "Please try a city and country.",
+                None,
+            )
+        except WeatherTimeoutError:
+            return "The weather service took too long to respond. Please try again shortly.", None
+        except WeatherProviderError:
+            return "I couldn't retrieve verified weather data just now. Please try again shortly.", None
+        except Exception:
+            return "I couldn't retrieve verified weather data just now. Please try again shortly.", None
+
+        context = {
+            "location": location,
+            "resolved_location": result.location,
+            "target_date": result.target_date.isoformat(),
+        }
+        return self._format_weather(result), context
+
+    def _weather_date_from_text(self, text: str) -> date:
+        today = datetime.now(ZoneInfo(self.settings.timezone)).date()
+        lowered = text.lower()
+        if "tomorrow" in lowered:
+            return today + timedelta(days=1)
+        if "today" in lowered or "current" in lowered or "right now" in lowered:
+            return today
+        for name, weekday in WEEKDAYS.items():
+            if name in lowered:
+                delta = (weekday - today.weekday()) % 7
+                if delta == 0:
+                    delta = 7
+                return today + timedelta(days=delta)
+        return today
+
+    @staticmethod
+    def _weather_location_from_text(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:weather|forecast|temperature|rain|snow)\s+(?:in|for|at)\s+(.+?)"
+            r"(?=\s+(?:today|tomorrow|on\s+\w+|right\s+now)\b|[?!.]|$)",
+            text,
+            re.I,
+        )
+        if not match:
+            match = re.search(
+                r"\b(?:in|at)\s+(.+?)\s+"
+                r"(?:weather|forecast|temperature|rain|snow)\b",
+                text,
+                re.I,
+            )
+        if not match:
+            return None
+        candidate = match.group(1).strip(" \t\r\n,?!.\"")
+        if candidate.casefold() in {"today", "tomorrow", "right now", "the moment"}:
+            return None
+        return candidate or None
+
+    @staticmethod
+    def _clean_location_answer(text: str) -> str:
+        cleaned = re.sub(
+            r"^(?:please\s+)?(?:check\s+)?(?:the\s+weather\s+)?(?:in|for|at)\s+",
+            "",
+            text.strip(),
+            flags=re.I,
+        )
+        return cleaned.strip(" \t\r\n,?!.\"")
+
+    @staticmethod
+    def _is_weather_followup(text: str, state: dict[str, Any]) -> bool:
+        if state.get("last_domain") != "weather" or not state.get("weather_context"):
+            return False
+        return bool(
+            re.fullmatch(
+                r"\s*(?:(?:and|what|how)\s+(?:about\s+)?)?"
+                r"(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|"
+                r"saturday|sunday)\s*[?!.]?\s*",
+                text,
+                re.I,
+            )
+        )
+
+    @staticmethod
+    def _format_weather(result: WeatherResult) -> str:
+        date_label = result.target_date.strftime("%A, %B %d")
+        if result.temperature_c is not None:
+            summary = (
+                f"In {result.location}, it's currently {result.temperature_c:g}°C "
+                f"and {result.condition}."
+            )
+        else:
+            summary = f"{result.location} will be {result.condition} on {date_label}."
+        details = (
+            f"The low is {result.minimum_temperature_c:g}°C and the high is "
+            f"{result.maximum_temperature_c:g}°C."
+        )
+        if result.precipitation_probability_percent is not None:
+            details += (
+                f" Peak precipitation chance is "
+                f"{result.precipitation_probability_percent}%."
+            )
+        retrieved = result.retrieved_at.astimezone(ZoneInfo("UTC")).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+        return f"{summary} {details} Source: {result.source}, retrieved {retrieved}."
 
     def _ask(
         self,
@@ -315,7 +635,8 @@ class Jarvis:
                 return None
             query = self._contact_query_from_answer(answer)
         while True:
-            matches = self.email_agent.resolve_contact(query)
+            with self.latency.measure("tool.contacts.search"):
+                matches = self.email_agent.resolve_contact(query)
             if len(matches) == 1:
                 return matches[0]
             if not matches:
@@ -344,18 +665,28 @@ class Jarvis:
     def _email_workflow(
         self, text: str, messages: list[dict[str, str]]
     ) -> tuple[str, ExecutionRecord | None]:
+        cached = self._load_email_artifact("email.initial")
+        if cached is not None:
+            return self._execute_email_proposal(cached, messages)
         request = self.email_agent.request_from_text(text)
         contact = self._resolve_contact(request.recipient_name or request.recipient_email, messages)
         if contact is None:
             return "Very well. I haven’t sent anything.", None
-        proposal = self.email_agent.compose(request, contact)
+        stage = "llm.email_draft" if hasattr(self.brain, "draft_email") else "email.compose"
+        with self.latency.measure(stage):
+            proposal = self.email_agent.compose(request, contact)
+        proposal = self._store_email_artifact("email.initial", proposal)
         return self._execute_email_proposal(proposal, messages)
 
     def _availability_email_workflow(
         self, text: str, messages: list[dict[str, str]]
     ) -> tuple[str, ExecutionRecord | None]:
+        cached = self._load_email_artifact("email.availability")
+        if cached is not None:
+            return self._execute_email_proposal(cached, messages)
         start = self._next_monday(date.today()) if "next week" in text.lower() else date.today()
-        slots = self.calendar_agent.free_slots(start, limit=2)
+        with self.latency.measure("tool.calendar.read"):
+            slots = self.calendar_agent.free_slots(start, limit=2)
         if not slots:
             return "I couldn’t find a suitable free slot in that range.", None
         request = self.email_agent.request_from_text(text)
@@ -363,13 +694,36 @@ class Jarvis:
         if contact is None:
             return "Very well. I haven’t sent anything.", None
         labels = [slot.strftime("%A at %I:%M %p").replace(" 0", " ") for slot in slots]
-        proposal = self.email_agent.compose_availability(contact, labels, operation=request.operation)
+        with self.latency.measure("email.compose"):
+            proposal = self.email_agent.compose_availability(
+                contact, labels, operation=request.operation
+            )
+        proposal = self._store_email_artifact("email.availability", proposal)
         return self._execute_email_proposal(proposal, messages)
 
     def _execute_email_proposal(
         self, proposal: EmailProposal, messages: list[dict[str, str]]
     ) -> tuple[str, ExecutionRecord | None]:
         while True:
+            if proposal.operation == "prepare":
+                answer = self._ask(
+                    messages,
+                    kind="email_proposal",
+                    prompt=self._format_prepared_email(proposal),
+                )
+                if self._is_rejection(answer):
+                    return "Very well. I haven’t sent or saved anything.", None
+                if self._requests_email_send(answer):
+                    proposal = proposal.model_copy(update={"operation": "send"})
+                    continue
+                if self._requests_email_draft_save(answer):
+                    proposal = proposal.model_copy(update={"operation": "save_draft"})
+                    continue
+                if self._is_approval(answer):
+                    continue
+                proposal = self._cached_email_revision(proposal, answer)
+                continue
+
             risk = RiskLevel.EXTERNAL_WRITE if proposal.operation == "send" else RiskLevel.REVERSIBLE
             action = ProposedAction(
                 tool_name=f"gmail.{proposal.operation}",
@@ -390,16 +744,16 @@ class Jarvis:
                 return "Very well. I haven’t sent anything.", None
             if self._is_approval(answer):
                 break
-            proposal = self.email_agent.revise(proposal, answer)
+            proposal = self._cached_email_revision(proposal, answer)
 
         if proposal.operation == "send":
             record = self.executions.execute_once(
-                action, lambda: self.gmail.send(proposal).model_dump(mode="json")
+                action, lambda: self._execute_gmail(proposal)
             )
             success = "Sent." if record.status == "verified" else self._failure_message(record)
         else:
             record = self.executions.execute_once(
-                action, lambda: self.gmail.save_draft(proposal).model_dump(mode="json")
+                action, lambda: self._execute_gmail(proposal)
             )
             success = "Draft saved." if record.status == "verified" else self._failure_message(record)
         return success, record
@@ -437,8 +791,18 @@ class Jarvis:
 
         if not any(word in lowered for word in ("move", "reschedul", "cancel", "create", "add")):
             if "free" in lowered or "available" in lowered:
-                start = self._next_monday(date.today()) if "next week" in lowered else date.today()
-                slots = self.calendar_agent.free_slots(start, limit=3)
+                requested_day = self._date_from_text(text)
+                if "next week" in lowered:
+                    start = self._next_monday(date.today())
+                    days = 5
+                elif requested_day is not None:
+                    start = requested_day
+                    days = 1
+                else:
+                    start = date.today()
+                    days = 5
+                with self.latency.measure("tool.calendar.read"):
+                    slots = self.calendar_agent.free_slots(start, days=days, limit=3)
                 if not slots:
                     return "I couldn’t find a suitable free slot in that range.", [], None
                 labels = ", ".join(
@@ -446,13 +810,15 @@ class Jarvis:
                 )
                 return f"You’re free {labels}.", [], None
             day = self._date_from_text(text) or date.today()
-            events = self.calendar_agent.events_for_day(day)
+            with self.latency.measure("tool.calendar.read"):
+                events = self.calendar_agent.events_for_day(day)
             response = self._summarize_schedule(day, events)
             return response, [event.model_dump(mode="json") for event in events], None
 
         prior = [CalendarEvent.model_validate(event) for event in state.get("recent_events", [])]
         reference = self._event_reference(text)
-        candidates = self.calendar_agent.find_events(reference, prior or None)
+        with self.latency.measure("tool.calendar.read"):
+            candidates = self.calendar_agent.find_events(reference, prior or None)
         if not candidates:
             return f"I couldn’t find an event matching “{reference}”.", state.get("recent_events", []), None
         if len(candidates) > 1:
@@ -491,7 +857,8 @@ class Jarvis:
                 return "I couldn’t establish the date, so I haven’t changed anything.", state.get("recent_events", []), None
             target_time = self._time_from_text(text)
             if target_time is None:
-                free = self.calendar_agent.free_slots(target_day, days=1, limit=4)
+                with self.latency.measure("tool.calendar.read"):
+                    free = self.calendar_agent.free_slots(target_day, days=1, limit=4)
                 if not free:
                     return "I couldn’t find an available time that day.", state.get("recent_events", []), None
                 choices = " or ".join(slot.strftime("%I:%M %p").lstrip("0") for slot in free)
@@ -549,9 +916,13 @@ class Jarvis:
         instruction: str,
         messages: list[dict[str, str]],
     ) -> tuple[str, ExecutionRecord | None]:
+        cached = self._load_email_artifact("email.after_calendar")
+        if cached is not None:
+            return self._execute_email_proposal(cached, messages)
         contact: ResolvedContact | None = None
         for attendee in event.attendees:
-            matches = self.email_agent.resolve_contact(attendee)
+            with self.latency.measure("tool.contacts.search"):
+                matches = self.email_agent.resolve_contact(attendee)
             if len(matches) == 1:
                 contact = matches[0]
                 break
@@ -565,15 +936,16 @@ class Jarvis:
             if "apolog" in instruction.lower() or "sorry" in instruction.lower()
             else "let you know that our meeting has been updated"
         )
-        proposal = self.email_agent.compose(
-            EmailRequest(
-                operation="send",
-                recipient_name=contact.name,
-                recipient_email=contact.email,
-                desired_outcome=outcome,
-            ),
-            contact,
+        request = EmailRequest(
+            operation="send",
+            recipient_name=contact.name,
+            recipient_email=contact.email,
+            desired_outcome=outcome,
         )
+        stage = "llm.email_draft" if hasattr(self.brain, "draft_email") else "email.compose"
+        with self.latency.measure(stage):
+            proposal = self.email_agent.compose(request, contact)
+        proposal = self._store_email_artifact("email.after_calendar", proposal)
         return self._execute_email_proposal(proposal, messages)
 
     def _create_event_proposal(
@@ -618,14 +990,67 @@ class Jarvis:
             attendees=[],
         )
 
+    def _load_email_artifact(self, artifact_key: str) -> EmailProposal | None:
+        task_id = self._task_context.get()
+        if not task_id:
+            return None
+        value = self.artifacts.get(task_id, artifact_key)
+        return EmailProposal.model_validate(value) if value is not None else None
+
+    def _store_email_artifact(
+        self, artifact_key: str, proposal: EmailProposal
+    ) -> EmailProposal:
+        task_id = self._task_context.get()
+        if not task_id:
+            return proposal
+        value = self.artifacts.get_or_create(
+            task_id,
+            artifact_key,
+            lambda: proposal.model_dump(mode="json"),
+        )
+        return EmailProposal.model_validate(value)
+
+    def _cached_email_revision(
+        self, proposal: EmailProposal, feedback: str
+    ) -> EmailProposal:
+        fingerprint = hashlib.sha256(
+            f"{proposal.model_dump_json()}\n{feedback}".encode("utf-8")
+        ).hexdigest()
+        artifact_key = f"email.revision.{fingerprint}"
+        cached = self._load_email_artifact(artifact_key)
+        if cached is not None:
+            return cached
+        stage = "llm.email_revise" if hasattr(self.brain, "revise_email") else "email.revise"
+        with self.latency.measure(stage):
+            revised = self.email_agent.revise(proposal, feedback)
+        return self._store_email_artifact(artifact_key, revised)
+
     def _execute_calendar(self, proposal: CalendarProposal) -> dict[str, Any]:
-        if proposal.operation == "update_event":
-            result = self.calendar.update_event(proposal)
-        elif proposal.operation == "cancel_event":
-            result = self.calendar.cancel_event(proposal)
-        else:
-            result = self.calendar.create_event(proposal)
+        with self.latency.measure(f"tool.calendar.{proposal.operation}"):
+            if proposal.operation == "update_event":
+                result = self.calendar.update_event(proposal)
+            elif proposal.operation == "cancel_event":
+                result = self.calendar.cancel_event(proposal)
+            else:
+                result = self.calendar.create_event(proposal)
         return result.model_dump(mode="json")
+
+    def _execute_gmail(self, proposal: EmailProposal) -> dict[str, Any]:
+        with self.latency.measure(f"tool.gmail.{proposal.operation}"):
+            if proposal.operation == "send":
+                result = self.gmail.send(proposal)
+            else:
+                result = self.gmail.save_draft(proposal)
+        return result.model_dump(mode="json")
+
+    @staticmethod
+    def _format_prepared_email(proposal: EmailProposal) -> str:
+        return (
+            f"To: {proposal.recipient_name} <{proposal.recipient_email}>\n"
+            f"Subject: {proposal.subject}\n\n{proposal.body}\n\n"
+            "I’ve prepared this email. Nothing has been sent or saved. "
+            "Would you like me to revise it, save it as a Gmail draft, or send it?"
+        )
 
     @staticmethod
     def _format_email_approval(proposal: EmailProposal) -> str:
@@ -781,6 +1206,14 @@ class Jarvis:
             lowered == word or lowered.startswith(f"{word} ") or word in lowered
             for word in REJECT_WORDS
         )
+
+    @staticmethod
+    def _requests_email_send(text: str) -> bool:
+        return bool(re.search(r"\bsend\b", text, re.I))
+
+    @staticmethod
+    def _requests_email_draft_save(text: str) -> bool:
+        return bool(re.search(r"\bsave\b.*\bdraft\b|\bdraft\b.*\bsave\b", text, re.I))
 
     @staticmethod
     def _next_monday(day: date) -> date:

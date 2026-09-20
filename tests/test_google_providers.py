@@ -18,6 +18,31 @@ class Request:
         return self.value
 
 
+class FailingRequest:
+    def __init__(self, message):
+        self.message = message
+
+    def execute(self):
+        raise RuntimeError(self.message)
+
+
+class GoogleNotFoundError(Exception):
+    def __init__(self):
+        self.resp = type("Response", (), {"status": 404})()
+        super().__init__("not found")
+
+
+class CalendarGetRequest:
+    def __init__(self, events, event_id):
+        self.events = events
+        self.event_id = event_id
+
+    def execute(self):
+        if self.event_id not in self.events:
+            raise GoogleNotFoundError()
+        return self.events[self.event_id]
+
+
 class GmailDrafts:
     def __init__(self):
         self.raw = None
@@ -91,6 +116,25 @@ def test_gmail_provider_builds_mime_verifies_and_enforces_send_gate() -> None:
     assert decoded["Subject"] == "Lunch"
 
 
+def test_gmail_provider_marks_ambiguous_send_failure_uncertain() -> None:
+    service = GmailService()
+    service.users_api.messages_api.send = lambda **_: FailingRequest("connection lost")
+    provider = GoogleGmailProvider(OAuth(service), allow_send=True)
+    proposal = EmailProposal(
+        recipient_name="Jisoo Park",
+        recipient_email="jisoo@example.com",
+        subject="Lunch",
+        body="Are you free?",
+        operation="send",
+    )
+
+    result = provider.send(proposal)
+
+    assert not result.ok
+    assert result.outcome_uncertain
+    assert "without a verified outcome" in result.error
+
+
 class CalendarEvents:
     def __init__(self):
         self.items = {
@@ -102,6 +146,7 @@ class CalendarEvents:
             }
         }
         self.insert_body = None
+        self.deleted = []
 
     def list(self, **kwargs):
         return Request({"items": list(self.items.values())})
@@ -112,7 +157,19 @@ class CalendarEvents:
         return Request({"id": "event-new"})
 
     def get(self, **kwargs):
-        return Request(self.items[kwargs["eventId"]])
+        return CalendarGetRequest(self.items, kwargs["eventId"])
+
+    def delete(self, **kwargs):
+        event_id = kwargs["eventId"]
+        self.deleted.append(
+            {
+                "calendarId": kwargs["calendarId"],
+                "eventId": event_id,
+                "sendUpdates": kwargs["sendUpdates"],
+            }
+        )
+        self.items.pop(event_id, None)
+        return Request({})
 
 
 class CalendarService:
@@ -159,3 +216,50 @@ def test_calendar_provider_write_gate_prevents_api_call() -> None:
     assert not result.ok
     assert "disabled" in result.error
     assert service.events_api.insert_body is None
+
+
+def test_calendar_provider_cancels_and_verifies_event_is_gone() -> None:
+    service = CalendarService()
+    provider = GoogleCalendarProvider(
+        OAuth(service), timezone_name="Asia/Seoul", allow_writes=True
+    )
+    proposal = CalendarProposal(
+        operation="cancel_event",
+        event_id="event-1",
+        title="Lunch",
+        start=datetime(2026, 9, 1, 13),
+        end=datetime(2026, 9, 1, 14),
+    )
+
+    result = provider.cancel_event(proposal)
+
+    assert result.ok and result.event_id == "event-1"
+    assert "event-1" not in service.events_api.items
+    assert service.events_api.deleted == [
+        {
+            "calendarId": "primary",
+            "eventId": "event-1",
+            "sendUpdates": "all",
+        }
+    ]
+
+
+def test_calendar_provider_marks_ambiguous_cancellation_failure_uncertain() -> None:
+    service = CalendarService()
+    service.events_api.delete = lambda **_: FailingRequest("connection lost")
+    provider = GoogleCalendarProvider(
+        OAuth(service), timezone_name="Asia/Seoul", allow_writes=True
+    )
+    proposal = CalendarProposal(
+        operation="cancel_event",
+        event_id="event-1",
+        title="Lunch",
+        start=datetime(2026, 9, 1, 13),
+        end=datetime(2026, 9, 1, 14),
+    )
+
+    result = provider.cancel_event(proposal)
+
+    assert not result.ok
+    assert result.outcome_uncertain
+    assert "without a verified outcome" in result.error

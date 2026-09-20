@@ -16,7 +16,22 @@ class EmailAgent:
 
     def request_from_text(self, text: str) -> EmailRequest:
         lowered = text.lower()
-        operation = "draft" if "draft" in lowered and "send" not in lowered else "send"
+        if re.search(r"\b(?:save|create)\b.*\bdraft\b", lowered):
+            operation = "save_draft"
+        elif re.search(r"\b(?:do\s+not|don't|not)\s+send\b", lowered):
+            operation = "prepare"
+        elif re.search(r"\bsend\b", lowered):
+            operation = "send"
+        elif re.search(r"\b(?:write|compose|draft)\b.*\b(?:email|e-mail|message)\b", lowered):
+            operation = "prepare"
+        elif re.search(
+            r"(?:^|\band\s+|\bthen\s+|\bplease\s+)"
+            r"(?:email|e-mail|mail)\s+(?:to\s+)?[\w.+-]+",
+            lowered,
+        ):
+            operation = "send"
+        else:
+            operation = "prepare"
         recipient = self._recipient_from_text(text)
         reason = None
         reason_match = re.search(r"(?:because|for)\s+(.+?)(?:[.!]|$)", text, re.I)
@@ -43,7 +58,7 @@ class EmailAgent:
                 recipient_email=contact.email,
                 subject=draft.subject,
                 body=draft.body,
-                operation="send" if request.operation == "send" else "save_draft",
+                operation=request.operation,
             )
         outcome = request.desired_outcome or "get in touch"
         subject = self._subject(outcome)
@@ -60,7 +75,7 @@ class EmailAgent:
             recipient_email=contact.email,
             subject=subject,
             body=body,
-            operation="send" if request.operation == "send" else "save_draft",
+            operation=request.operation,
         )
 
     def compose_availability(
@@ -75,7 +90,7 @@ class EmailAgent:
                 f"Hi {contact.name.split()[0]},\n\nWould any of these times work for you?\n"
                 f"{options}\n\nBest,"
             ),
-            operation="send" if operation == "send" else "save_draft",
+            operation=operation,
         )
 
     def revise(self, proposal: EmailProposal, feedback: str) -> EmailProposal:

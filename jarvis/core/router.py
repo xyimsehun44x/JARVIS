@@ -9,9 +9,21 @@ class Route(str, Enum):
     EMAIL = "email"
     CALENDAR = "calendar"
     CROSS_DOMAIN = "cross_domain"
+    WEATHER = "weather"
+    UNSUPPORTED_FRESH_DATA = "unsupported_fresh_data"
 
 
 class Router:
+    WEATHER_PATTERN = re.compile(
+        r"\b(?:weather|forecast|temperature|rain(?:ing|y)?|snow(?:ing|y)?)\b",
+        re.I,
+    )
+    UNSUPPORTED_FRESH_PATTERN = re.compile(
+        r"\b(?:news|headlines|stock\s+price|share\s+price|bitcoin\s+price|"
+        r"crypto\s+price|exchange\s+rate|sports?\s+score|live\s+score|traffic|"
+        r"air\s+quality)\b",
+        re.I,
+    )
     EMAIL_WORDS = ("email", "e-mail", "mail ", "send him", "send her")
     CALENDAR_WORDS = (
         "calendar",
@@ -34,6 +46,10 @@ class Router:
     def explicit_route(self, text: str) -> Route | None:
         """Return an unambiguous route without spending a model round trip."""
         lowered = text.lower()
+        if self.WEATHER_PATTERN.search(text):
+            return Route.WEATHER
+        if self.UNSUPPORTED_FRESH_PATTERN.search(text):
+            return Route.UNSUPPORTED_FRESH_DATA
         email = bool(re.search(r"\b(?:email|e-mail|mail)\b", lowered))
         calendar = any(
             marker in lowered

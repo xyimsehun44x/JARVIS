@@ -75,6 +75,13 @@ class MockCalendarProvider:
                 return CalendarExecutionResult(ok=True, event_id=event.event_id)
         return CalendarExecutionResult(ok=False, error="Event not found")
 
+    def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
+        for event in self.events:
+            if event.event_id == proposal.event_id:
+                self.events.remove(event)
+                return CalendarExecutionResult(ok=True, event_id=event.event_id)
+        return CalendarExecutionResult(ok=False, error="Event not found")
+
 
 class GoogleCalendarProvider:
     def __init__(
@@ -115,9 +122,12 @@ class GoogleCalendarProvider:
         if not self.allow_writes:
             return self._write_disabled()
         try:
+            service = self.oauth.service("calendar", "v3")
+        except Exception as exc:
+            return CalendarExecutionResult(ok=False, error=str(exc))
+        try:
             result = (
-                self.oauth.service("calendar", "v3")
-                .events()
+                service.events()
                 .insert(
                     calendarId=self.calendar_id,
                     body=self._body(proposal),
@@ -127,7 +137,11 @@ class GoogleCalendarProvider:
             )
             return self._verify(result.get("id"), proposal)
         except Exception as exc:
-            return CalendarExecutionResult(ok=False, error=str(exc))
+            return CalendarExecutionResult(
+                ok=False,
+                outcome_uncertain=True,
+                error=f"Calendar event creation ended without a verified outcome: {exc}",
+            )
 
     def update_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
         if not self.allow_writes:
@@ -135,9 +149,12 @@ class GoogleCalendarProvider:
         if not proposal.event_id:
             return CalendarExecutionResult(ok=False, error="Missing event ID")
         try:
+            service = self.oauth.service("calendar", "v3")
+        except Exception as exc:
+            return CalendarExecutionResult(ok=False, event_id=proposal.event_id, error=str(exc))
+        try:
             result = (
-                self.oauth.service("calendar", "v3")
-                .events()
+                service.events()
                 .patch(
                     calendarId=self.calendar_id,
                     eventId=proposal.event_id,
@@ -148,7 +165,12 @@ class GoogleCalendarProvider:
             )
             return self._verify(result.get("id"), proposal)
         except Exception as exc:
-            return CalendarExecutionResult(ok=False, error=str(exc))
+            return CalendarExecutionResult(
+                ok=False,
+                event_id=proposal.event_id,
+                outcome_uncertain=True,
+                error=f"Calendar event update ended without a verified outcome: {exc}",
+            )
 
     def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
         if not self.allow_writes:
@@ -157,6 +179,9 @@ class GoogleCalendarProvider:
             return CalendarExecutionResult(ok=False, error="Missing event ID")
         try:
             service = self.oauth.service("calendar", "v3")
+        except Exception as exc:
+            return CalendarExecutionResult(ok=False, event_id=proposal.event_id, error=str(exc))
+        try:
             service.events().delete(
                 calendarId=self.calendar_id,
                 eventId=proposal.event_id,
@@ -167,7 +192,10 @@ class GoogleCalendarProvider:
                     calendarId=self.calendar_id, eventId=proposal.event_id
                 ).execute()
                 return CalendarExecutionResult(
-                    ok=False, event_id=proposal.event_id, error="Event still exists after deletion"
+                    ok=False,
+                    event_id=proposal.event_id,
+                    outcome_uncertain=True,
+                    error="Calendar event still exists after the cancellation request",
                 )
             except Exception as verification_error:
                 status = getattr(getattr(verification_error, "resp", None), "status", None)
@@ -175,24 +203,42 @@ class GoogleCalendarProvider:
                     raise
             return CalendarExecutionResult(ok=True, event_id=proposal.event_id)
         except Exception as exc:
-            return CalendarExecutionResult(ok=False, error=str(exc))
+            return CalendarExecutionResult(
+                ok=False,
+                event_id=proposal.event_id,
+                outcome_uncertain=True,
+                error=f"Calendar cancellation ended without a verified outcome: {exc}",
+            )
 
     def _verify(
         self, event_id: str | None, proposal: CalendarProposal
     ) -> CalendarExecutionResult:
         if not event_id:
-            return CalendarExecutionResult(ok=False, error="Calendar returned no event ID")
-        item = (
-            self.oauth.service("calendar", "v3")
-            .events()
-            .get(calendarId=self.calendar_id, eventId=event_id)
-            .execute()
-        )
+            return CalendarExecutionResult(
+                ok=False,
+                outcome_uncertain=True,
+                error="Calendar accepted the write request but returned no event ID",
+            )
+        try:
+            item = (
+                self.oauth.service("calendar", "v3")
+                .events()
+                .get(calendarId=self.calendar_id, eventId=event_id)
+                .execute()
+            )
+        except Exception as exc:
+            return CalendarExecutionResult(
+                ok=False,
+                event_id=event_id,
+                outcome_uncertain=True,
+                error=f"Calendar accepted the write but verification failed: {exc}",
+            )
         event = self._to_event(item)
         ok = bool(event and event.title == proposal.title and event.start == proposal.start)
         return CalendarExecutionResult(
             ok=ok,
             event_id=event_id,
+            outcome_uncertain=not ok,
             error=None if ok else "Calendar verification did not match the approved payload",
         )
 
@@ -245,10 +291,3 @@ class GoogleCalendarProvider:
             ok=False,
             error="Live Calendar writes are disabled by JARVIS_ALLOW_CALENDAR_WRITES",
         )
-
-    def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
-        for event in self.events:
-            if event.event_id == proposal.event_id:
-                self.events.remove(event)
-                return CalendarExecutionResult(ok=True, event_id=event.event_id)
-        return CalendarExecutionResult(ok=False, error="Event not found")

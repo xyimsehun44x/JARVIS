@@ -1,4 +1,5 @@
-{"input":"Email David.","expects":"ambiguous_contact","must_not":"invent_email"}
-{"input":"Email Jisoo and say hello.","followups":["make it friendlier","never mind"],"external_writes":0}
-{"input":"Email Jisoo and say hello.","followups":["send it"],"external_writes":1,"requires_verification":true}
-
+{"id":"ambiguous-contact-no-write","input":"Email David.","route":"email","expect":{"interrupt":"clarification","prompt_contains":["David Kim","David Lee"],"proposal_absent":true},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"revise-then-reject","input":"Email Jisoo and say hello.","route":"email","expect":{"interrupt":"approval","proposal_operation":"send"},"followups":[{"input":"make it friendlier","expect":{"interrupt":"approval","prompt_contains":["Just a quick note"]}},{"input":"never mind","expect":{"needs_input":false,"response_contains":["haven’t sent anything"]}}],"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"approved-send-verified","input":"Email Jisoo and say hello.","route":"email","expect":{"interrupt":"approval","proposal_operation":"send"},"followups":[{"input":"send it","expect":{"needs_input":false,"response_contains":["Sent."]}}],"final":{"sent":1,"drafts":0,"calendar_changed":false,"execution_ok":true}}
+{"id":"write-means-prepare","input":"Write an email to Jisoo saying hello.","route":"email","expect":{"interrupt":"email_proposal","prompt_contains":["Nothing has been sent or saved"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"prepare-then-save-draft","input":"Draft an email to Jisoo saying hello.","route":"email","expect":{"interrupt":"email_proposal","prompt_contains":["Nothing has been sent or saved"]},"followups":[{"input":"save it as a draft","expect":{"needs_input":false,"response_contains":["Draft saved."]}}],"final":{"sent":0,"drafts":1,"calendar_changed":false,"execution_ok":true}}

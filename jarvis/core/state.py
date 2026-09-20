@@ -18,6 +18,7 @@ class JarvisState(TypedDict, total=False):
         "failed",
     ]
     active_domain: str | None
+    last_domain: str | None
     task_summary: str | None
     delegated_task: dict[str, Any] | None
     agent_result: dict[str, Any] | None
@@ -28,4 +29,4 @@ class JarvisState(TypedDict, total=False):
     execution_result: dict[str, Any] | None
     response_text: str | None
     recent_events: list[dict[str, Any]]
-
+    weather_context: dict[str, Any] | None

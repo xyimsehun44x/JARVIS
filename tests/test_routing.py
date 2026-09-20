@@ -27,6 +27,12 @@ def test_routes_conversation_email_calendar_and_cross_domain() -> None:
         router.route("Find when I'm free next week and email David two options")
         is Route.CROSS_DOMAIN
     )
+    assert router.explicit_route("Weather in Seoul today") is Route.WEATHER
+    assert router.explicit_route("Will it rain in Seoul tomorrow?") is Route.WEATHER
+    assert (
+        router.explicit_route("What is the current stock price?")
+        is Route.UNSUPPORTED_FRESH_DATA
+    )
 
 
 def test_fast_route_only_handles_explicit_actions() -> None:

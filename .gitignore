@@ -9,6 +9,13 @@ __pycache__/
 venv/
 *.db
 *.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite3-shm
+*.sqlite3-wal
+benchmarks/*.json
+jarvis.vocabulary.json
+jarvis.vocabulary.json.tmp
 *.py[cod]
 dist/
 build/

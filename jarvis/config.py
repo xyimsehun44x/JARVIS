@@ -17,12 +17,23 @@ class Settings:
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.8-flash"
     gemini_thinking_level: str = "low"
-    stt_model: str = "base.en"
-    stt_beam_size: int = 1
+    stt_model: str = "small.en"
+    stt_beam_size: int = 5
     stt_hotwords: str = "Jarvis"
+    stt_initial_prompt: str = (
+        "Jarvis personal assistant; Tell me something interesting; email, calendar, "
+        "meeting, weather, forecast, contacts, Joo, Seoul, Busan"
+    )
+    stt_vad_filter: bool = True
+    stt_action_confidence_threshold: float = 0.35
+    stt_vocabulary_limit: int = 15
+    vocabulary_path: str = "jarvis.vocabulary.json"
+    latency_logging: bool = False
     confirm_drafts: bool = False
     user_name: str | None = None
     timezone: str = "Asia/Seoul"
+    default_location: str | None = None
+    weather_timeout_seconds: float = 5.0
     persistence: str = "memory"
     database_path: str = "jarvis.db"
     google_credentials_path: str = "credentials.json"
@@ -50,13 +61,29 @@ class Settings:
             gemini_thinking_level=os.getenv(
                 "JARVIS_GEMINI_THINKING_LEVEL", "low"
             ).lower(),
-            stt_model=os.getenv("JARVIS_STT_MODEL", "base.en"),
-            stt_beam_size=int(os.getenv("JARVIS_STT_BEAM_SIZE", "1")),
+            stt_model=os.getenv("JARVIS_STT_MODEL", "small.en"),
+            stt_beam_size=int(os.getenv("JARVIS_STT_BEAM_SIZE", "5")),
             stt_hotwords=os.getenv("JARVIS_STT_HOTWORDS", "Jarvis"),
+            stt_initial_prompt=os.getenv(
+                "JARVIS_STT_INITIAL_PROMPT",
+                "Jarvis personal assistant; Tell me something interesting; email, calendar, "
+                "meeting, weather, forecast, contacts, Joo, Seoul, Busan",
+            ),
+            stt_vad_filter=_env_bool("JARVIS_STT_VAD_FILTER", True),
+            stt_action_confidence_threshold=float(
+                os.getenv("JARVIS_STT_ACTION_CONFIDENCE_THRESHOLD", "0.35")
+            ),
+            stt_vocabulary_limit=int(os.getenv("JARVIS_STT_VOCABULARY_LIMIT", "15")),
+            vocabulary_path=os.getenv(
+                "JARVIS_VOCABULARY_PATH", "jarvis.vocabulary.json"
+            ),
+            latency_logging=_env_bool("JARVIS_LATENCY_LOGGING", False),
             confirm_drafts=os.getenv("JARVIS_CONFIRM_DRAFTS", "false").lower()
             in {"1", "true", "yes", "on"},
             user_name=os.getenv("JARVIS_USER_NAME") or None,
             timezone=os.getenv("JARVIS_TIMEZONE", "Asia/Seoul"),
+            default_location=os.getenv("JARVIS_DEFAULT_LOCATION") or None,
+            weather_timeout_seconds=float(os.getenv("JARVIS_WEATHER_TIMEOUT_SECONDS", "5")),
             persistence=os.getenv(
                 "JARVIS_PERSISTENCE", "sqlite" if mode == "google" else "memory"
             ).lower(),
@@ -82,10 +109,20 @@ class Settings:
             errors.append("OPENAI_API_KEY is required for the OpenAI provider")
         if self.llm_provider == "gemini" and not self.gemini_api_key:
             errors.append("GEMINI_API_KEY is required for the Gemini provider")
-        if self.gemini_thinking_level not in {"low", "medium", "high"}:
-            errors.append("JARVIS_GEMINI_THINKING_LEVEL must be low, medium, or high")
+        if self.gemini_thinking_level not in {"minimal", "low", "medium", "high"}:
+            errors.append(
+                "JARVIS_GEMINI_THINKING_LEVEL must be minimal, low, medium, or high"
+            )
         if self.stt_beam_size < 1:
             errors.append("JARVIS_STT_BEAM_SIZE must be at least 1")
+        if not 0 <= self.stt_action_confidence_threshold <= 1:
+            errors.append(
+                "JARVIS_STT_ACTION_CONFIDENCE_THRESHOLD must be between 0 and 1"
+            )
+        if not 1 <= self.stt_vocabulary_limit <= 15:
+            errors.append("JARVIS_STT_VOCABULARY_LIMIT must be between 1 and 15")
+        if self.weather_timeout_seconds <= 0:
+            errors.append("JARVIS_WEATHER_TIMEOUT_SECONDS must be greater than zero")
         if self.mode == "google" and not Path(self.google_credentials_path).is_file():
             errors.append(
                 f"Google desktop OAuth credentials not found: {self.google_credentials_path}"

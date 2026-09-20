@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 
 class EmailRequest(BaseModel):
-    operation: Literal["draft", "send"] = "draft"
+    operation: Literal["prepare", "save_draft", "send"] = "prepare"
     recipient_name: str | None = None
     recipient_email: str | None = None
     topic: str | None = None
@@ -25,7 +25,7 @@ class EmailProposal(BaseModel):
     recipient_email: str
     subject: str
     body: str
-    operation: Literal["save_draft", "send"]
+    operation: Literal["prepare", "save_draft", "send"]
 
 
 class EmailExecutionResult(BaseModel):
@@ -33,5 +33,5 @@ class EmailExecutionResult(BaseModel):
     operation: Literal["save_draft", "send"]
     message_id: str | None = None
     draft_id: str | None = None
+    outcome_uncertain: bool = False
     error: str | None = None
-

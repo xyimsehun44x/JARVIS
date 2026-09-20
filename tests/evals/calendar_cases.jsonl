@@ -1,4 +1,4 @@
-{"input":"Move tomorrow's meeting.","expects":"reference_resolution"}
-{"input":"Move the dinner to Friday.","expects":"missing_time_clarification"}
-{"input":"Cancel the dinner.","followups":["no"],"external_writes":0}
-
+{"id":"move-meeting-needs-time","input":"Move the meeting with David to Monday.","route":"calendar","expect":{"interrupt":"clarification","prompt_contains":["Which would you prefer"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"move-dinner-needs-time","input":"Move the dinner to Friday.","route":"calendar","expect":{"interrupt":"clarification","prompt_contains":["Which would you prefer"]},"final":{"sent":0,"drafts":0,"calendar_changed":false}}
+{"id":"cancel-rejected-no-write","input":"Cancel the dinner.","route":"calendar","expect":{"interrupt":"approval","proposal_operation":"cancel_event"},"followups":[{"input":"no","expect":{"needs_input":false,"response_contains":["haven’t changed anything"]}}],"final":{"sent":0,"drafts":0,"calendar_changed":false,"event_present":["event-dinner",true]}}
+{"id":"cancel-approved-verified","input":"Cancel the dinner.","route":"calendar","expect":{"interrupt":"approval","proposal_operation":"cancel_event"},"followups":[{"input":"yes","expect":{"needs_input":false,"response_contains":["cancelled"]}}],"final":{"sent":0,"drafts":0,"calendar_changed":true,"event_present":["event-dinner",false],"execution_ok":true}}
