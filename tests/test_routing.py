@@ -28,6 +28,14 @@ def test_routes_conversation_email_calendar_and_cross_domain() -> None:
         is Route.CROSS_DOMAIN
     )
     assert router.explicit_route("Weather in Seoul today") is Route.WEATHER
+    assert (
+        router.explicit_route("Remember that my timezone is Asia/Seoul")
+        is Route.MEMORY
+    )
+    assert (
+        router.explicit_route("What do you remember about my timezone?")
+        is Route.MEMORY
+    )
     assert router.explicit_route("Will it rain in Seoul tomorrow?") is Route.WEATHER
     assert (
         router.explicit_route("What is the current stock price?")
@@ -40,6 +48,7 @@ def test_fast_route_only_handles_explicit_actions() -> None:
 
     assert router.explicit_route("Are you online?") is None
     assert router.explicit_route("I hate Monday meetings") is None
+    assert router.explicit_route("Remember to email David") is Route.EMAIL
     assert router.explicit_route("Email David about lunch") is Route.EMAIL
     assert router.explicit_route("Move the dinner meeting to Friday") is Route.CALENDAR
     assert (

@@ -49,6 +49,14 @@ An invalid shortcut or a combination already owned by another application is rep
 without stopping Jarvis; the previous shortcut and tray controls continue to work. The
 settings panel displays Gmail-send and Calendar-write locks but cannot change them.
 
+The settings panel also includes backend-owned long-term-memory controls. Active records
+and lifecycle history show their kind, sensitivity, provenance, and update time. A
+correction displays the exact current value before saving, forgetting requires a second
+confirmation, and only forgotten records without an active replacement can be restored.
+The desktop receives records through typed private IPC; it never receives a database path
+and refuses credential-like content. These controls change conversation context only and
+cannot approve email, calendar, or device actions.
+
 The child process uses `python` by default. Set `JARVIS_PYTHON_EXECUTABLE` to an explicit
 Python executable if the command is not on `PATH`. Set `JARVIS_PROJECT_ROOT` only when
 running the desktop binary away from the repository during development. Packaging the

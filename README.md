@@ -44,6 +44,11 @@ Keep `JARVIS_ALLOW_EMAIL_SEND=false` and
 you deliberately enable either flag, restart Jarvis and rerun Google setup if the
 required OAuth scope changed.
 
+If Google expires or revokes the saved refresh token, setup treats that token as absent
+and opens a fresh interactive authorization instead of failing with `invalid_grant`.
+The Gemini API key and Google Workspace OAuth token are separate credentials: success in
+AI Studio does not validate Gmail, Calendar, or Contacts access.
+
 Set `JARVIS_DEFAULT_LOCATION=Seoul, South Korea` (or another city and country) to
 answer location-free weather questions directly. Without it, Jarvis asks for a
 location once. `JARVIS_WEATHER_TIMEOUT_SECONDS` controls the read timeout and defaults
@@ -159,6 +164,31 @@ hardening task.
   not retried until reconciliation explicitly verifies the result or declares a retry safe.
 - Success is reported only when the provider returns a verified result.
 - Long-term memory writes require an explicit user request in V0.1.
+
+## Structured long-term memory
+
+Long-term memory changes are deterministic and require explicit language. Ordinary
+conversation never creates a memory. Supported examples include:
+
+```text
+Remember that my meeting preference is avoid Mondays.
+What do you remember about my meeting preference?
+Correct what you remember about my meeting preference to prefer Tuesdays.
+Forget what you remember about my meeting preference.
+```
+
+Memories carry stable IDs, kind, provenance, confidence, sensitivity, lifecycle status,
+timestamps, and supersession links. Corrections preserve the previous record; forgetting
+soft-deletes the active record so the change remains auditable. Only relevant active,
+non-sensitive memories may be supplied to ordinary conversation, as untrusted data rather
+than instructions. Sensitive memories require explicit recall, and credentials, access
+tokens, payment-card data, and private keys are refused entirely.
+
+The desktop settings panel exposes the same lifecycle through private typed IPC. It lists
+active records and audit history, supports inline correction with exact old/new values,
+requires deliberate confirmation before forgetting, and restores only eligible forgotten
+records. Credential-like legacy rows are never returned to the desktop, and memory
+controls cannot authorize email, calendar, or operating-system actions.
 
 Credentials, tokens, local databases, and `.env` are ignored by Git. Google mode is
 lazy: starting Jarvis does not authorize an account, and API access occurs only when a

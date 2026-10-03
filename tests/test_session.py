@@ -332,6 +332,52 @@ def test_clear_new_request_abandons_contact_clarification() -> None:
     jarvis.close()
 
 
+def test_clear_new_request_does_not_replay_failed_external_reads_after_restart(
+    tmp_path,
+) -> None:
+    class ContactProviderThatFailsIfReplayed:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def search(self, query: str):
+            del query
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("expired external authorization")
+            return []
+
+    contacts = ContactProviderThatFailsIfReplayed()
+    settings = Settings(
+        persistence="sqlite",
+        database_path=str(tmp_path / "pending-abandon.db"),
+    )
+    first = Jarvis(
+        settings=settings,
+        contacts=contacts,
+        conversation_model=RecordingConversationModel(),
+    )
+    pending = SessionCoordinator(first).turn(
+        "Email Nobody and say hello", thread_id="persisted-topic-switch"
+    )
+    assert pending.needs_input
+    first.close()
+
+    second = Jarvis(
+        settings=settings,
+        contacts=contacts,
+        conversation_model=RecordingConversationModel(),
+    )
+    result = SessionCoordinator(second).turn(
+        "Remember that my timezone is Asia/Seoul",
+        thread_id="persisted-topic-switch",
+    )
+
+    assert "Asia/Seoul" in (result.response or "")
+    assert contacts.calls == 1
+    assert not second.has_pending_input("persisted-topic-switch")
+    second.close()
+
+
 def test_clear_new_request_abandons_proposal_without_sending() -> None:
     model = ChangingEmailModel()
     jarvis = Jarvis(settings=Settings(), conversation_model=model)

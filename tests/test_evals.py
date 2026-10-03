@@ -21,6 +21,7 @@ EVAL_FILES = (
     "email_cases.jsonl",
     "calendar_cases.jsonl",
     "weather_cases.jsonl",
+    "memory_cases.jsonl",
 )
 
 
@@ -102,6 +103,18 @@ def _assert_final(
     if "execution_ok" in expected:
         execution = jarvis.state(thread_id=thread_id).get("execution_result") or {}
         assert execution.get("ok") is expected["execution_ok"], case_id
+    if "active_memory" in expected:
+        memory_expectation = expected["active_memory"]
+        entry = jarvis.memory.get(memory_expectation["key"])
+        if memory_expectation.get("absent"):
+            assert entry is None, case_id
+        else:
+            assert entry is not None, case_id
+            assert entry.value == memory_expectation["value"], case_id
+    if "memory_history_statuses" in expected:
+        history_expectation = expected["memory_history_statuses"]
+        history = jarvis.memory.history(history_expectation["key"])
+        assert [entry.status.value for entry in history] == history_expectation["statuses"], case_id
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from jarvis.core.jarvis import Jarvis, TurnResult
 from jarvis.core.router import Route
+from jarvis.memory.intents import parse_memory_command
 from jarvis.voice.normalizer import NormalizedUtterance
 
 
@@ -88,11 +89,13 @@ class TierDispatcher:
         stripped = text.strip()
         if self._APPROVAL.fullmatch(stripped) or self._REJECTION.fullmatch(stripped):
             return False
+        if parse_memory_command(stripped) is not None:
+            return True
         return bool(self._CLEAR_NEW_REQUEST.search(stripped))
 
     def is_sensitive_action(self, text: str) -> bool:
         route = self.jarvis.router.explicit_route(text)
-        return route in {Route.EMAIL, Route.CROSS_DOMAIN} or bool(
+        return route in {Route.EMAIL, Route.CROSS_DOMAIN, Route.MEMORY} or bool(
             self._CALENDAR_WRITE.search(text)
         )
 
@@ -151,11 +154,7 @@ class SessionCoordinator:
                 )
             if has_pending and self.dispatcher.is_clear_new_request(normalized_text):
                 with self.jarvis.latency.measure("pending.abandon"):
-                    abandoned = self.jarvis.resume(
-                        "cancel", thread_id=thread_id, trace_id=trace_id
-                    )
-                if abandoned.needs_input:
-                    return abandoned
+                    self.jarvis.abandon_pending(thread_id)
                 self._locally_pending_threads.discard(thread_id)
                 has_pending = False
             with self.jarvis.latency.measure("tier.dispatch"):

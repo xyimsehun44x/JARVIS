@@ -8,8 +8,8 @@ Required fields:
 
 - `id`: unique, stable scenario name
 - `input`: initial user utterance
-- `route`: expected `conversation`, `email`, `calendar`, `cross_domain`, `weather`, or
-  `unsupported_fresh_data` route
+- `route`: expected `conversation`, `email`, `calendar`, `cross_domain`, `weather`,
+  `memory`, or `unsupported_fresh_data` route
 - `expect`: assertions for the initial turn
 
 Optional fields:
@@ -22,7 +22,8 @@ Optional fields:
 Supported turn assertions include `needs_input`, `interrupt`, `prompt_contains`,
 `response_contains`, `proposal_absent`, and `proposal_operation`. Supported final
 assertions include `sent`, `drafts`, `calendar_changed`, `event_present`, and
-`execution_ok`.
+`execution_ok`. Memory cases may also assert `active_memory` and
+`memory_history_statuses`.
 
 Run only the text evaluations with:
 

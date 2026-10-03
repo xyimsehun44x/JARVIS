@@ -83,10 +83,37 @@
           <p class="settings-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
         </form>
 
+        <section class="memory-settings" aria-labelledby="memory-settings-title">
+          <div class="memory-settings-heading">
+            <div>
+              <p class="eyebrow">Long-term context</p>
+              <h3 id="memory-settings-title">Memory</h3>
+            </div>
+            <button class="secondary memory-refresh" id="memory-refresh" type="button">
+              Refresh
+            </button>
+          </div>
+          <p class="memory-intro">
+            Inspect explicit memories here. Changes affect context only and never approve
+            email, calendar, or device actions.
+          </p>
+          <p class="memory-feedback" id="memory-feedback" role="status" aria-live="polite"></p>
+
+          <div class="memory-group">
+            <h4>Active <span id="memory-active-count">0</span></h4>
+            <div class="memory-list" id="memory-active-list"></div>
+          </div>
+
+          <details class="memory-history">
+            <summary>History <span id="memory-history-count">0</span></summary>
+            <div class="memory-list" id="memory-history-list"></div>
+          </details>
+        </section>
+
         <p class="settings-privacy">
-          Only the desktop shortcut is stored here. Credentials, conversations, and
-          approval payloads are never written to desktop preferences. Safety locks are
-          read-only in this panel.
+          Only the desktop shortcut is written to desktop preferences. Memories remain in
+          the backend memory store. Credentials and approval payloads are never accepted
+          here, and safety locks are read-only.
         </p>
       </section>
 

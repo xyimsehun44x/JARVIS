@@ -1,11 +1,11 @@
 # Jarvis Project Handoff — 2026-09-14
 
 Original checkpoint: 2026-09-14
-Last updated: 2026-09-19
+Last updated: 2026-10-03
 
 This is the primary continuation document for the next development chat. It records the
 implemented state, live validation results, safety constraints, open work, milestone
-status, and recommended roadmap as of 2026-09-19. The filename retains the original
+status, and recommended roadmap as of 2026-10-03. The filename retains the original
 handoff date so existing links remain valid.
 
 ## Read this first
@@ -38,7 +38,7 @@ Current milestone status:
 | 1. Verified weather support | Complete | Open-Meteo reads, location handling, failure safety |
 | 2. Measured voice optimization | Complete | Accuracy profile, normalization, vocabulary, streaming, natural TTS |
 | 3. Windows desktop vertical slice | Complete | Tauri app, voice, tray, hotkey, settings, diagnostics validated |
-| 4. Structured long-term memory | Next | Explicit remember/recall/forget/correct behavior |
+| 4. Structured long-term memory | Complete | Explicit lifecycle, safe retrieval, migration, desktop controls, and live validation |
 | 5. Provider-specific reconciliation | Not started | Resolve ambiguous Gmail/Calendar writes safely |
 | 6. Realtime voice conversation | Not started | Endpoint detection, incremental STT, barge-in, cancellation |
 | 7. Safe local OS actions | Not started | Allowlisted deterministic Windows commands |
@@ -46,8 +46,8 @@ Current milestone status:
 
 Latest verification:
 
-- Python suite: **141 passing tests**.
-- Targeted IPC/model suite: **20 passing tests**.
+- Python suite: **162 passing tests**.
+- Focused memory/IPC suite: **23 passing tests**.
 - Desktop TypeScript/Vite production build: passing with Vite 7.3.6.
 - Rust/Tauri suite: **6 passing tests** against Tauri 2.11.5; Clippy passes with warnings denied.
 - Latest live desktop run: Gemini streaming recovered with no fallback, and the response
@@ -114,8 +114,75 @@ desktop vertical slice:
 - The Rust suite increased to six tests. The targeted IPC suite, TypeScript build, Rust
   formatting, and Clippy passed during implementation; the final full suites also passed.
 
-Milestone 3 is complete. The active implementation slice is now structured long-term
-memory.
+Milestone 3 is complete.
+
+The first Milestone 4 backend slice completed on 2026-09-23:
+
+- Replaced key/value memory with a versioned typed record containing a stable ID, kind,
+  reason, provenance, confidence, sensitivity, lifecycle status, timestamps, and
+  supersession links.
+- Added an idempotent SQLite migration that preserves legacy `long_term_memory` rows and
+  does not resurrect corrected or forgotten records on restart.
+- Added explicit remember, recall, correct, and forget commands. They route
+  deterministically without spending a language-model call.
+- Corrections create a new record and supersede the old one. Forgetting is a recoverable
+  status transition rather than a destructive delete.
+- Ordinary remarks never create memory. Credential-like material is rejected at both the
+  parser and storage boundary.
+- Sensitive memories can be explicitly recalled but are excluded from automatic context.
+  Relevant normal memories are passed to conversation as provenance-bearing, untrusted
+  data and are not persisted into the conversation transcript.
+- Low-confidence spoken memory mutations are rejected by the speech safety gate, and an
+  explicit memory command safely abandons an unrelated pending workflow before running.
+- Added lifecycle, conflict, sensitivity, migration, restart, context-isolation, routing,
+  topic-switch, and declarative evaluation coverage. The focused suite passed 58 tests;
+  the full Python suite passed all 155 tests.
+
+The second Milestone 4 slice completed on 2026-09-24:
+
+- Extended the private JSONL protocol with typed `memory.list`, `memory.correct`,
+  `memory.forget`, and `memory.restore` requests. Mutations identify an exact record ID;
+  no database path or credential is exposed.
+- Added a compact Memory section to desktop settings with active records, lifecycle
+  history, kind, sensitivity, provenance, and timestamps.
+- Correction is an inline exact-value edit and returns both old and new records. Forget
+  requires a second deliberate confirmation. Restore appears only for eligible forgotten
+  records with no active replacement.
+- Credential-like material is rejected on correction and restoration. Legacy credential
+  rows are filtered out before desktop serialization.
+- Memory controls remain context-only and do not create approval or execution authority
+  for email, calendar, or device actions.
+- Added IPC lifecycle, parameter-validation, credential-filtering, and migration tests.
+  The full Python suite passed all 158 tests at implementation time; the current suite has
+  162 passing tests. The TypeScript/Vite build, Rust suite, and Rust formatting check pass.
+
+The first 2026-09-24 live attempt exposed a persisted-interrupt recovery defect rather
+than a Gemini-key failure. The `desktop-main` thread still held an older email contact
+clarification; resuming it replayed Contacts lookup, whose separate Google OAuth refresh
+token had been revoked (`invalid_grant`). New clear requests now abandon the pending
+LangGraph task directly without replaying external reads or writes. Revoked refresh tokens
+also fall back to fresh interactive OAuth setup, and private IPC logs the exception class
+to stderr without logging request content. The real `desktop-main` checkpoint was repaired,
+the requested meeting preference was stored, and a streamed Gemini turn succeeded on that
+same thread.
+
+Milestone 4 live acceptance completed on 2026-10-03:
+
+- Google Calendar read access and ordinary Gemini conversation worked in the repaired
+  persistent desktop thread.
+- Deterministic normal-memory recall returned the corrected active value.
+- A dummy home address was stored with a visible Sensitive label, excluded from automatic
+  value disclosure, and returned only by explicit recall.
+- Explicit password storage was refused, and the desktop correction boundary rejected the
+  same credential-like value without altering the existing record.
+- Active/history inspection and the previously exercised correction, deliberate forget,
+  restoration, and restart-persistence flows behaved as designed.
+- Sensitive and credential-like memory turns are redacted when persisted, and model-facing
+  history is scrubbed dynamically so older desktop transcripts cannot bypass the sensitive
+  memory retrieval boundary. The focused 23-test suite and full 162-test suite pass.
+
+Milestone 4 is complete. The next implementation milestone is provider-specific
+reconciliation.
 
 ## Product and architecture implemented
 
@@ -408,10 +475,12 @@ and compare repeatable warm P50/P95 measurements.
 ### Memory gaps
 
 - LangGraph/SQLite conversation persistence works.
-- A long-term memory scaffold exists, but normal conversation does not yet consistently
-  retrieve and inject durable preferences/facts.
-- Explicit remember, recall, forget, correct, provenance, conflict, sensitivity, and UI
-  controls remain.
+- The structured backend supports explicit remember, recall, correct, and forget flows,
+  history-preserving lifecycle state, migration, relevance filtering, and sensitivity.
+- Retrieval is deliberately deterministic and lexical. Add embeddings only if measured
+  retrieval quality demonstrates a need.
+- Desktop settings expose active/history inspection, correction, deliberate forget, and
+  eligible-record restoration without exposing storage paths or credentials.
 
 ### Integration/recovery gaps
 
@@ -473,14 +542,26 @@ and shut down cleanly while preserving its shared thread. Replacement of a rare
 interrupted partial stream remains automated-test verified and may be observed if it
 recurs naturally; it is not a desktop milestone blocker.
 
-### Milestone 4 — structured long-term memory
+### Milestone 4 — structured long-term memory: complete
 
-- Add explicit remember, recall, forget, and correct flows.
-- Store provenance, confidence, sensitivity, status, timestamps, and supersession.
-- Retrieve only relevant memories.
-- Add inspect/correct/delete UI.
-- Begin with structured storage; add embeddings only if measured retrieval quality needs
-  them.
+Already delivered:
+
+- Explicit remember, recall, forget, and correct flows.
+- Versioned records with provenance, confidence, sensitivity, status, timestamps, and
+  supersession.
+- Safe legacy SQLite migration and restart persistence.
+- Relevant-only automatic retrieval with sensitive-memory exclusion.
+- Credential refusal and low-confidence voice mutation gating.
+- Deterministic lifecycle and behavioral evaluations.
+- Typed private desktop IPC for list, correct, forget, and restore operations.
+- Desktop active/history inspection, sensitive labels, inline correction, deliberate
+  forget confirmation, and eligible-record restoration.
+- Desktop filtering and mutation rejection for credential-like legacy data.
+
+The exit condition is met: memory is explicit, versioned, inspectable, correctable,
+recoverably forgettable, restart-persistent, sensitive by policy, and unable to authorize
+external actions. Continue using structured lexical retrieval; add embeddings only if
+measured retrieval quality needs them.
 
 ### Milestone 5 — provider-specific reconciliation
 
@@ -520,22 +601,21 @@ vertical slices above.
 
 ## Exact next action
 
-Begin Milestone 4 with the structured long-term-memory foundation:
+Begin Milestone 5 with provider-specific reconciliation:
 
-1. Replace the current key/value-only memory record with a versioned typed model carrying
-   stable ID, kind, value, provenance/reason, confidence, sensitivity, status, creation
-   and update timestamps, and supersession metadata.
-2. Add a safe SQLite migration that preserves existing `long_term_memory` rows and keep
-   an equivalent in-memory implementation for tests.
-3. Define explicit remember, recall, forget, and correct operations. Never infer consent
-   for a memory write from ordinary conversation.
-4. Make correction supersede history rather than silently overwriting it, and make forget
-   auditable/recoverable instead of an untracked destructive delete.
-5. Retrieve only relevant active, non-sensitive memories and preserve provenance in the
-   internal result; do not inject the entire store into prompts.
-6. Add deterministic routing and behavioral tests for explicit consent, conflicts,
-   sensitivity, correction, forgetting, persistence, and restart behavior before adding
-   desktop memory controls.
+1. Inventory the exact stable identifiers and verification reads available for Gmail
+   drafts/sends and Google Calendar creates/updates/cancellations.
+2. Extend execution records with provider operation IDs, remote resource IDs, attempt
+   timestamps, and reconciliation status without storing credentials or message bodies.
+3. Add provider-specific reconciliation methods that can prove `verified`, `not_applied`,
+   or `uncertain`; never infer success from a timeout or generic transport error.
+4. Permit retry only after a verified `not_applied` result. Leave unresolved outcomes
+   blocked as `uncertain` and explain that state to the user.
+5. Build deterministic fake-provider tests for success, timeout-before-write,
+   timeout-after-write, duplicate prevention, restart recovery, and failed verification
+   before any live write testing.
+6. Keep Gmail sending and Calendar writes locked during implementation. Any later live
+   write test requires a separate explicit user decision and exact-payload approval.
 
 The 2026-09-19 smoke test also showed microphone RMS back at -34.4 to -39.8 dBFS after a
 previous run near -20 dBFS. Check the selected input device, Windows gain, and microphone
@@ -665,8 +745,8 @@ benchmarks/VOICE_BASELINE.md    complete voice benchmark history and protocol
 
 > Read `PROJECT_HANDOFF_2026_09_14.md` and `claudev2.5.md` completely, then inspect the
 > current working tree without discarding uncommitted changes. Treat the dated handoff as
-> the current implementation record. Milestones 0 through 3 are complete; Milestone 4 is
-> next. The Python suite has 141 passing tests, the desktop Vite build passes, and
+> the current implementation record. Milestones 0 through 4 are complete; Milestone 5 is
+> next. The Python suite has 162 passing tests, the desktop Vite build passes, and
 > the latest desktop run restored Gemini streaming with 1,397–2,780ms first-token times
 > and roughly 6,157ms median speech onset. A 2026-09-19 smoke test confirmed that normal
 > Tier-1 and Tier-2 response bubbles now appear when speech begins instead of after
@@ -674,7 +754,13 @@ benchmarks/VOICE_BASELINE.md    complete voice benchmark history and protocol
 > automated-test verified because the interruption did not recur. Tray Show/Hide/Quit,
 > close-to-tray, the configurable global shortcut, and the minimal settings/diagnostics
 > panel are live-validated, including conflict rollback and persistence across restart.
-> Begin the structured long-term-memory foundation next. Preserve the shared LangGraph
-> thread, exact approval safeguards, CLI paths, and
+> The structured memory backend, legacy migration, explicit lifecycle, relevance filter,
+> sensitive-memory exclusion, deterministic routing, typed desktop IPC, and settings
+> controls for inspect/correct/forget/restore are implemented and live-validated.
+> A persisted-interrupt replay defect and revoked Google Workspace OAuth token were found;
+> safe pending-task abandonment and revoked-token reauthorization are now implemented.
+> Begin provider-specific reconciliation with fake-provider tests and keep Gmail sending
+> and Calendar writes locked. Preserve the shared LangGraph thread, exact approval
+> safeguards, CLI paths, and
 > locked Gmail-send/Calendar-write settings. Do not reorganize `jarvis/` or expose any
 > credentials.

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from jarvis.memory.intents import parse_memory_command
+
 
 class Route(str, Enum):
     CONVERSATION = "conversation"
@@ -10,6 +12,7 @@ class Route(str, Enum):
     CALENDAR = "calendar"
     CROSS_DOMAIN = "cross_domain"
     WEATHER = "weather"
+    MEMORY = "memory"
     UNSUPPORTED_FRESH_DATA = "unsupported_fresh_data"
 
 
@@ -46,6 +49,8 @@ class Router:
     def explicit_route(self, text: str) -> Route | None:
         """Return an unambiguous route without spending a model round trip."""
         lowered = text.lower()
+        if parse_memory_command(text) is not None:
+            return Route.MEMORY
         if self.WEATHER_PATTERN.search(text):
             return Route.WEATHER
         if self.UNSUPPORTED_FRESH_PATTERN.search(text):
@@ -109,6 +114,8 @@ class Router:
 
     def route(self, text: str) -> Route:
         lowered = text.lower()
+        if parse_memory_command(text) is not None:
+            return Route.MEMORY
         email = any(word in lowered for word in self.EMAIL_WORDS)
         calendar = any(word in lowered for word in self.CALENDAR_WORDS)
         cross_domain = email and any(

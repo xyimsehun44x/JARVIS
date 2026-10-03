@@ -10,8 +10,23 @@ from pydantic import ValidationError
 from jarvis.config import Settings
 from jarvis.core.jarvis import Jarvis, TurnResult
 from jarvis.core.session import SessionCoordinator
-from jarvis.ipc.protocol import IpcError, IpcEvent, IpcRequest, IpcResponse
+from jarvis.ipc.protocol import (
+    IpcError,
+    IpcEvent,
+    IpcRequest,
+    IpcResponse,
+    MemoryCorrectParams,
+    MemoryListParams,
+    MemoryMutationParams,
+)
 from jarvis.ipc.voice import DesktopVoiceRuntime, DesktopVoiceTurn
+from jarvis.memory.intents import classify_memory_sensitivity
+from jarvis.memory.long_term import (
+    MemoryEntry,
+    MemorySensitivity,
+    MemoryStatus,
+    is_restricted_memory_material,
+)
 
 
 class StdioIpcServer:
@@ -94,6 +109,14 @@ class StdioIpcServer:
                     result = {"status": "cancelled"}
                 else:
                     result = self._voice.cancel(request_id=request.request_id)
+            elif request.method == "memory.list":
+                result = self._memory_list(request)
+            elif request.method == "memory.correct":
+                result = self._memory_correct(request)
+            elif request.method == "memory.forget":
+                result = self._memory_forget(request)
+            elif request.method == "memory.restore":
+                result = self._memory_restore(request)
             else:
                 self._require_no_params(request)
                 result = {"status": "shutting_down"}
@@ -105,7 +128,12 @@ class StdioIpcServer:
                 message=str(exc),
             )
             return
-        except Exception:
+        except Exception as exc:
+            print(
+                f"Desktop IPC {request.method} failed: {type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
             self._emit_error(
                 request.request_id,
                 code="internal_error",
@@ -211,6 +239,100 @@ class StdioIpcServer:
                 "calendar_writes": settings.allow_calendar_writes,
             },
         }
+
+    def _memory_list(self, request: IpcRequest) -> dict[str, Any]:
+        MemoryListParams.model_validate(request.params)
+        entries = [
+            entry
+            for entry in self.session.jarvis.memory.list_all(include_sensitive=True)
+            if not is_restricted_memory_material(entry.key, entry.value)
+        ]
+        return {
+            "active": [
+                self._memory_record(entry)
+                for entry in entries
+                if entry.status is MemoryStatus.ACTIVE
+            ],
+            "history": [
+                self._memory_record(entry)
+                for entry in entries
+                if entry.status is not MemoryStatus.ACTIVE
+            ],
+        }
+
+    def _memory_correct(self, request: IpcRequest) -> dict[str, Any]:
+        params = MemoryCorrectParams.model_validate(request.params)
+        value = params.value.strip()
+        if not value:
+            raise ValueError("memory.correct.value must not be blank")
+        old = self._managed_memory(params.memory_id, required_status=MemoryStatus.ACTIVE)
+        inferred = classify_memory_sensitivity(f"{old.key} {value}")
+        sensitivity = (
+            MemorySensitivity.SENSITIVE
+            if old.sensitivity is MemorySensitivity.SENSITIVE
+            or inferred is MemorySensitivity.SENSITIVE
+            else MemorySensitivity.NORMAL
+        )
+        replacement = self.session.jarvis.memory.correct(
+            old.key,
+            value,
+            reason="explicit desktop correction",
+            explicit=True,
+            kind=old.kind,
+            provenance="explicit_desktop_correction",
+            sensitivity=sensitivity,
+        )
+        return {
+            "old": self._memory_record(old),
+            "new": self._memory_record(replacement),
+        }
+
+    def _memory_forget(self, request: IpcRequest) -> dict[str, Any]:
+        params = MemoryMutationParams.model_validate(request.params)
+        entry = self._managed_memory(
+            params.memory_id, required_status=MemoryStatus.ACTIVE
+        )
+        if not self.session.jarvis.memory.forget(
+            entry.key,
+            reason="explicit desktop forget",
+            explicit=True,
+        ):
+            raise ValueError("The memory is no longer active")
+        forgotten = self.session.jarvis.memory.get_by_id(entry.memory_id)
+        if forgotten is None:
+            raise RuntimeError("Forgotten memory could not be loaded")
+        return {"memory": self._memory_record(forgotten)}
+
+    def _memory_restore(self, request: IpcRequest) -> dict[str, Any]:
+        params = MemoryMutationParams.model_validate(request.params)
+        entry = self._managed_memory(
+            params.memory_id, required_status=MemoryStatus.FORGOTTEN
+        )
+        restored = self.session.jarvis.memory.restore(
+            entry.memory_id,
+            reason="explicit desktop restoration",
+            explicit=True,
+        )
+        return {"memory": self._memory_record(restored)}
+
+    def _managed_memory(
+        self,
+        memory_id: str,
+        *,
+        required_status: MemoryStatus,
+    ) -> MemoryEntry:
+        entry = self.session.jarvis.memory.get_by_id(memory_id)
+        if entry is None:
+            raise ValueError("Memory record was not found")
+        if is_restricted_memory_material(entry.key, entry.value):
+            raise ValueError("Credential-like memory cannot be managed in the desktop UI")
+        if entry.status is not required_status:
+            raise ValueError(f"Memory record must be {required_status.value}")
+        return entry
+
+    @staticmethod
+    def _memory_record(entry: MemoryEntry) -> dict[str, Any]:
+        return entry.model_dump(mode="json")
 
     @staticmethod
     def _turn_result(result: TurnResult) -> dict[str, Any]:

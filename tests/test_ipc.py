@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from io import StringIO
 
 from jarvis.config import Settings
@@ -106,6 +107,152 @@ def test_stdio_ipc_reports_invalid_requests_and_continues() -> None:
     assert responses[2]["error"]["code"] == "invalid_params"
     assert responses[3]["request_id"] == "health-2"
     assert responses[3]["ok"] is True
+
+
+def test_stdio_ipc_manages_memory_by_record_id_with_exact_lifecycle_results() -> None:
+    jarvis = Jarvis(settings=Settings())
+    correct_target = jarvis.memory.remember(
+        "meeting preference",
+        "avoid Mondays",
+        reason="explicit request",
+        explicit=True,
+    )
+    forget_target = jarvis.memory.remember(
+        "timezone",
+        "Asia/Seoul",
+        reason="explicit request",
+        explicit=True,
+    )
+    restore_target = jarvis.memory.remember(
+        "coffee preference",
+        "flat white",
+        reason="explicit request",
+        explicit=True,
+    )
+    assert jarvis.memory.forget("coffee preference", explicit=True)
+    secret_rejection_target = jarvis.memory.remember(
+        "editor preference",
+        "VS Code",
+        reason="explicit request",
+        explicit=True,
+    )
+
+    input_stream = StringIO(
+        "\n".join(
+            [
+                _request("memory-list", "memory.list"),
+                _request(
+                    "memory-correct",
+                    "memory.correct",
+                    {
+                        "memory_id": correct_target.memory_id,
+                        "value": "prefer Tuesdays",
+                    },
+                ),
+                _request(
+                    "memory-forget",
+                    "memory.forget",
+                    {"memory_id": forget_target.memory_id},
+                ),
+                _request(
+                    "memory-restore",
+                    "memory.restore",
+                    {"memory_id": restore_target.memory_id},
+                ),
+                _request(
+                    "memory-secret",
+                    "memory.correct",
+                    {
+                        "memory_id": secret_rejection_target.memory_id,
+                        "value": "sk-abcdefghijklmnopqrstuvwxyz123456",
+                    },
+                ),
+                _request(
+                    "memory-password",
+                    "memory.correct",
+                    {
+                        "memory_id": secret_rejection_target.memory_id,
+                        "value": "my password is not-for-storage",
+                    },
+                ),
+                _request("memory-bad-params", "memory.list", {"database_path": "x"}),
+                _request("stop", "shutdown"),
+            ]
+        )
+    )
+    output_stream = StringIO()
+    try:
+        StdioIpcServer(
+            SessionCoordinator(jarvis),
+            input_stream=input_stream,
+            output_stream=output_stream,
+        ).serve()
+    finally:
+        jarvis.close()
+
+    responses = {
+        message["request_id"]: message
+        for message in _messages(output_stream)
+        if message["type"] == "response"
+    }
+    listed = responses["memory-list"]["result"]
+    assert {entry["key"] for entry in listed["active"]} == {
+        "meeting_preference",
+        "timezone",
+        "editor_preference",
+    }
+    assert [entry["key"] for entry in listed["history"]] == ["coffee_preference"]
+
+    correction = responses["memory-correct"]["result"]
+    assert correction["old"]["value"] == "avoid Mondays"
+    assert correction["new"]["value"] == "prefer Tuesdays"
+    assert correction["new"]["supersedes_id"] == correct_target.memory_id
+    assert responses["memory-forget"]["result"]["memory"]["status"] == "forgotten"
+    assert responses["memory-restore"]["result"]["memory"]["status"] == "active"
+    assert responses["memory-secret"]["error"]["code"] == "invalid_params"
+    assert responses["memory-password"]["error"]["code"] == "invalid_params"
+    assert responses["memory-bad-params"]["error"]["code"] == "invalid_params"
+
+
+def test_stdio_ipc_never_lists_credential_like_legacy_memory(tmp_path) -> None:
+    database = tmp_path / "legacy-memory.db"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE long_term_memory (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO long_term_memory VALUES (?, ?, ?, ?)",
+        ("api_key", "legacy-value", "legacy", "2026-01-02T00:00:00+00:00"),
+    )
+    connection.commit()
+    connection.close()
+
+    output_stream = StringIO()
+    jarvis = Jarvis(
+        settings=Settings(persistence="sqlite", database_path=str(database))
+    )
+    try:
+        StdioIpcServer(
+            SessionCoordinator(jarvis),
+            input_stream=StringIO(_request("memory-list", "memory.list")),
+            output_stream=output_stream,
+        ).serve()
+    finally:
+        jarvis.close()
+
+    response = next(
+        message
+        for message in _messages(output_stream)
+        if message.get("request_id") == "memory-list"
+    )
+    assert response["result"] == {"active": [], "history": []}
 
 
 def test_stdio_ipc_streams_desktop_text_without_requesting_voice_style() -> None:

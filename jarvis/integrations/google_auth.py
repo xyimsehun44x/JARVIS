@@ -4,6 +4,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -31,7 +32,13 @@ class GoogleOAuth:
         with self._lock:
             credentials = self._load_token()
             if credentials and credentials.expired and credentials.refresh_token:
-                credentials.refresh(Request())
+                try:
+                    credentials.refresh(Request())
+                except RefreshError:
+                    # A revoked refresh token cannot be repaired. Treat it as absent so an
+                    # explicit interactive setup can obtain and persist fresh credentials.
+                    credentials = None
+                    self._credentials = None
             if not credentials or not credentials.valid or not credentials.has_scopes(self.scopes):
                 if not interactive:
                     raise RuntimeError(
@@ -89,4 +96,3 @@ def scopes_for_settings(settings) -> list[str]:
     if settings.enable_contacts:
         scopes.append(CONTACTS_READONLY_SCOPE)
     return scopes
-

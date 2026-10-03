@@ -21,9 +21,27 @@ class IpcRequest(BaseModel):
         "voice.start",
         "voice.stop",
         "voice.cancel",
+        "memory.list",
+        "memory.correct",
+        "memory.forget",
+        "memory.restore",
         "shutdown",
     ]
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryListParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class MemoryMutationParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1, max_length=128)
+
+
+class MemoryCorrectParams(MemoryMutationParams):
+    value: str = Field(min_length=1, max_length=4000)
 
 
 class IpcError(BaseModel):

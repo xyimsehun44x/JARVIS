@@ -34,6 +34,43 @@ type DesktopHotkeyStatus = {
   error?: string;
   source: "default" | "environment" | "saved" | string;
 };
+type BackendMethod =
+  | "health"
+  | "turn"
+  | "voice.start"
+  | "voice.stop"
+  | "voice.cancel"
+  | "memory.list"
+  | "memory.correct"
+  | "memory.forget"
+  | "memory.restore"
+  | "shutdown";
+type MemoryStatus = "active" | "superseded" | "forgotten";
+type MemoryRecord = {
+  schema_version: number;
+  memory_id: string;
+  key: string;
+  value: string;
+  kind: "preference" | "fact" | "identity" | "instruction" | "other";
+  reason: string;
+  provenance: string;
+  confidence: number;
+  sensitivity: "normal" | "sensitive";
+  status: MemoryStatus;
+  created_at: string;
+  updated_at: string;
+  supersedes_id?: string;
+  superseded_by_id?: string;
+  status_reason?: string;
+};
+type MemoryListResult = {
+  active: MemoryRecord[];
+  history: MemoryRecord[];
+};
+type PendingBackendRequest = {
+  resolve: (result: Record<string, unknown>) => void;
+  reject: (error: Error) => void;
+};
 
 const conversation = required<HTMLDivElement>("conversation");
 const emptyState = required<HTMLDivElement>("empty-state");
@@ -62,13 +99,21 @@ const diagnosticProvider = required<HTMLElement>("diagnostic-provider");
 const diagnosticVoice = required<HTMLElement>("diagnostic-voice");
 const diagnosticEmail = required<HTMLElement>("diagnostic-email");
 const diagnosticCalendar = required<HTMLElement>("diagnostic-calendar");
+const memoryRefresh = required<HTMLButtonElement>("memory-refresh");
+const memoryFeedback = required<HTMLParagraphElement>("memory-feedback");
+const memoryActiveCount = required<HTMLElement>("memory-active-count");
+const memoryHistoryCount = required<HTMLElement>("memory-history-count");
+const memoryActiveList = required<HTMLDivElement>("memory-active-list");
+const memoryHistoryList = required<HTMLDivElement>("memory-history-list");
 const pendingTurns = new Map<string, PendingTurn>();
+const pendingBackendRequests = new Map<string, PendingBackendRequest>();
 const voiceTranscriptBubbles = new Map<string, HTMLDivElement>();
 
 let backendReady = false;
 let voiceAvailable = false;
 let busy = true;
 let recording = false;
+let memoryBusy = false;
 let currentHotkey: DesktopHotkeyStatus | undefined;
 
 function required<T extends HTMLElement>(id: string): T {
@@ -136,7 +181,7 @@ function appendBubble(role: "user" | "assistant" | "system", text = ""): HTMLDiv
 }
 
 function newRequest(
-  method: "health" | "turn" | "voice.start" | "voice.stop" | "voice.cancel" | "shutdown",
+  method: BackendMethod,
   params = {},
 ): Record<string, unknown> {
   return {
@@ -149,6 +194,21 @@ function newRequest(
 
 async function sendRequest(request: Record<string, unknown>): Promise<void> {
   await invoke("backend_send", { request });
+}
+
+function requestBackend(
+  method: BackendMethod,
+  params: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const request = newRequest(method, params);
+  const requestId = request.request_id as string;
+  return new Promise((resolve, reject) => {
+    pendingBackendRequests.set(requestId, { resolve, reject });
+    void sendRequest(request).catch((error: unknown) => {
+      pendingBackendRequests.delete(requestId);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
 }
 
 async function sendTurn(text: string): Promise<void> {
@@ -258,6 +318,7 @@ function applyHealth(payload: Record<string, unknown> | undefined): void {
   backendReady = true;
   busy = false;
   setStatus("Ready", "ready");
+  if (!settingsPanel.hidden && !memoryBusy) void loadMemories();
 }
 
 function handleVoiceState(message: IpcMessage): void {
@@ -335,6 +396,18 @@ function handleIpc(message: IpcMessage): void {
   }
 
   if (!message.request_id) return;
+  const pendingBackendRequest = pendingBackendRequests.get(message.request_id);
+  if (pendingBackendRequest) {
+    pendingBackendRequests.delete(message.request_id);
+    if (message.ok) {
+      pendingBackendRequest.resolve(message.result ?? {});
+    } else {
+      pendingBackendRequest.reject(
+        new Error(message.error?.message ?? "Jarvis could not complete that request."),
+      );
+    }
+    return;
+  }
   if (!message.ok) {
     const pending = pendingTurns.get(message.request_id);
     if (pending) {
@@ -379,6 +452,7 @@ function handleIpc(message: IpcMessage): void {
   busy = false;
   recording = false;
   setStatus(result.needs_input ? "Waiting for you" : "Ready", "ready");
+  if (!settingsPanel.hidden && !memoryBusy) void loadMemories();
 }
 
 function showApproval(summary: string, proposal: Record<string, unknown>): void {
@@ -391,6 +465,258 @@ function hideApproval(): void {
   approval.hidden = true;
   approvalSummary.textContent = "";
   approvalPayload.textContent = "";
+}
+
+function memoryLabel(key: string): string {
+  return key.replaceAll("_", " ");
+}
+
+function memoryTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.valueOf()) ? value : timestamp.toLocaleString();
+}
+
+function setMemoryFeedback(message: string, state?: "ready" | "error"): void {
+  memoryFeedback.textContent = message;
+  if (state) memoryFeedback.dataset.state = state;
+  else delete memoryFeedback.dataset.state;
+}
+
+function setMemoryBusy(value: boolean): void {
+  memoryBusy = value;
+  memoryRefresh.disabled = value;
+  for (const control of settingsPanel.querySelectorAll<
+    HTMLButtonElement | HTMLTextAreaElement
+  >(".memory-settings button, .memory-settings textarea")) {
+    control.disabled = value;
+  }
+}
+
+function memoryButton(label: string, className = "secondary"): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `${className} memory-action`;
+  button.textContent = label;
+  return button;
+}
+
+function memoryMetadata(entry: MemoryRecord): HTMLDivElement {
+  const metadata = document.createElement("div");
+  metadata.className = "memory-metadata";
+  for (const value of [
+    entry.kind,
+    entry.sensitivity,
+    entry.provenance.replaceAll("_", " "),
+    memoryTimestamp(entry.updated_at),
+  ]) {
+    const item = document.createElement("span");
+    item.textContent = value;
+    metadata.appendChild(item);
+  }
+  return metadata;
+}
+
+function showMemoryCorrection(card: HTMLElement, entry: MemoryRecord): void {
+  if (memoryBusy || card.querySelector(".memory-edit")) return;
+  const actions = card.querySelector<HTMLElement>(".memory-actions");
+  if (actions) actions.hidden = true;
+
+  const form = document.createElement("form");
+  form.className = "memory-edit";
+  const current = document.createElement("p");
+  current.className = "memory-current-value";
+  current.textContent = `Current value: ${entry.value}`;
+  const label = document.createElement("label");
+  label.textContent = "Corrected value";
+  const input = document.createElement("textarea");
+  input.rows = 2;
+  input.maxLength = 4000;
+  input.required = true;
+  input.value = entry.value;
+  label.appendChild(input);
+  const controls = document.createElement("div");
+  controls.className = "memory-edit-actions";
+  const cancel = memoryButton("Cancel");
+  const save = memoryButton("Save correction", "primary");
+  save.type = "submit";
+  controls.append(cancel, save);
+  form.append(current, label, controls);
+  card.appendChild(form);
+  input.focus();
+  input.select();
+
+  cancel.addEventListener("click", () => {
+    form.remove();
+    if (actions) actions.hidden = false;
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = input.value.trim();
+    if (!value) {
+      setMemoryFeedback("A corrected memory value cannot be blank.", "error");
+      input.focus();
+      return;
+    }
+    void (async () => {
+      setMemoryBusy(true);
+      setMemoryFeedback("Saving correction...");
+      try {
+        const result = await requestBackend("memory.correct", {
+          memory_id: entry.memory_id,
+          value,
+        });
+        const oldRecord = result.old as MemoryRecord;
+        const newRecord = result.new as MemoryRecord;
+        setMemoryFeedback(
+          oldRecord.memory_id === newRecord.memory_id
+            ? `${memoryLabel(entry.key)} is unchanged.`
+            : `Corrected ${memoryLabel(entry.key)}: “${oldRecord.value}” → “${newRecord.value}”.`,
+          "ready",
+        );
+        await loadMemories(false);
+      } catch (error) {
+        setMemoryFeedback(errorMessage(error), "error");
+      } finally {
+        setMemoryBusy(false);
+      }
+    })();
+  });
+}
+
+function showForgetConfirmation(actions: HTMLElement, entry: MemoryRecord): void {
+  if (memoryBusy) return;
+  actions.replaceChildren();
+  actions.classList.add("confirming");
+  const prompt = document.createElement("p");
+  prompt.textContent = `Forget “${memoryLabel(entry.key)}: ${entry.value}”?`;
+  const cancel = memoryButton("Keep");
+  const confirm = memoryButton("Confirm forget", "danger");
+  actions.append(prompt, cancel, confirm);
+  cancel.addEventListener("click", () => renderMemories());
+  confirm.addEventListener("click", () => {
+    void (async () => {
+      setMemoryBusy(true);
+      setMemoryFeedback("Forgetting memory...");
+      try {
+        await requestBackend("memory.forget", { memory_id: entry.memory_id });
+        setMemoryFeedback(
+          `Forgot ${memoryLabel(entry.key)}. It can be restored from History.`,
+          "ready",
+        );
+        await loadMemories(false);
+      } catch (error) {
+        setMemoryFeedback(errorMessage(error), "error");
+      } finally {
+        setMemoryBusy(false);
+      }
+    })();
+  });
+}
+
+let displayedMemories: MemoryListResult = { active: [], history: [] };
+
+function memoryCard(entry: MemoryRecord): HTMLElement {
+  const card = document.createElement("article");
+  card.className = "memory-card";
+  const heading = document.createElement("div");
+  heading.className = "memory-card-heading";
+  const title = document.createElement("strong");
+  title.textContent = memoryLabel(entry.key);
+  const statusBadge = document.createElement("span");
+  statusBadge.className = `memory-badge ${entry.status}`;
+  statusBadge.textContent = entry.status;
+  heading.append(title, statusBadge);
+  if (entry.sensitivity === "sensitive") {
+    const sensitiveBadge = document.createElement("span");
+    sensitiveBadge.className = "memory-badge sensitive";
+    sensitiveBadge.textContent = "sensitive";
+    heading.appendChild(sensitiveBadge);
+  }
+  const value = document.createElement("p");
+  value.className = "memory-value";
+  value.textContent = entry.value;
+  const actions = document.createElement("div");
+  actions.className = "memory-actions";
+
+  if (entry.status === "active") {
+    const edit = memoryButton("Correct");
+    const forget = memoryButton("Forget");
+    edit.addEventListener("click", () => showMemoryCorrection(card, entry));
+    forget.addEventListener("click", () => showForgetConfirmation(actions, entry));
+    actions.append(edit, forget);
+  } else if (
+    entry.status === "forgotten" &&
+    !displayedMemories.active.some((active) => active.key === entry.key)
+  ) {
+    const restore = memoryButton("Restore");
+    restore.addEventListener("click", () => {
+      if (memoryBusy) return;
+      void (async () => {
+        setMemoryBusy(true);
+        setMemoryFeedback("Restoring memory...");
+        try {
+          await requestBackend("memory.restore", { memory_id: entry.memory_id });
+          setMemoryFeedback(`Restored ${memoryLabel(entry.key)}.`, "ready");
+          await loadMemories(false);
+        } catch (error) {
+          setMemoryFeedback(errorMessage(error), "error");
+        } finally {
+          setMemoryBusy(false);
+        }
+      })();
+    });
+    actions.appendChild(restore);
+  }
+
+  card.append(heading, value, memoryMetadata(entry));
+  if (actions.childElementCount) card.appendChild(actions);
+  return card;
+}
+
+function renderMemoryList(container: HTMLElement, entries: MemoryRecord[]): void {
+  container.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = "No memory records in this section.";
+    container.appendChild(empty);
+    return;
+  }
+  for (const entry of entries) container.appendChild(memoryCard(entry));
+}
+
+function renderMemories(): void {
+  memoryActiveCount.textContent = String(displayedMemories.active.length);
+  memoryHistoryCount.textContent = String(displayedMemories.history.length);
+  renderMemoryList(memoryActiveList, displayedMemories.active);
+  renderMemoryList(memoryHistoryList, displayedMemories.history);
+}
+
+async function loadMemories(showLoading = true): Promise<void> {
+  if (!backendReady) {
+    setMemoryFeedback("Memory controls will load when the backend is ready.");
+    return;
+  }
+  setMemoryBusy(true);
+  if (showLoading) setMemoryFeedback("Loading memories...");
+  try {
+    const result = await requestBackend("memory.list");
+    displayedMemories = {
+      active: Array.isArray(result.active) ? (result.active as MemoryRecord[]) : [],
+      history: Array.isArray(result.history) ? (result.history as MemoryRecord[]) : [],
+    };
+    renderMemories();
+    if (showLoading) {
+      setMemoryFeedback(
+        `${displayedMemories.active.length} active memories loaded.`,
+        "ready",
+      );
+    }
+  } catch (error) {
+    setMemoryFeedback(errorMessage(error), "error");
+  } finally {
+    setMemoryBusy(false);
+  }
 }
 
 function renderHotkey(hotkey: DesktopHotkeyStatus): void {
@@ -436,7 +762,9 @@ function setSettingsOpen(open: boolean): void {
     settingsFeedback.textContent = "";
     delete settingsFeedback.dataset.state;
     if (currentHotkey) shortcutInput.value = currentHotkey.shortcut;
-    void loadDesktopHotkeyStatus(false).then(() => shortcutInput.focus());
+    void Promise.all([loadDesktopHotkeyStatus(false), loadMemories()]).then(() =>
+      shortcutInput.focus(),
+    );
   } else {
     settingsToggle.focus();
   }
@@ -445,7 +773,7 @@ function setSettingsOpen(open: boolean): void {
 function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
-  return "The shortcut could not be updated.";
+  return "The request could not be completed.";
 }
 
 async function saveDesktopHotkey(): Promise<void> {
@@ -502,6 +830,9 @@ shortcutForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void saveDesktopHotkey();
 });
+memoryRefresh.addEventListener("click", () => {
+  if (!memoryBusy) void loadMemories();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !settingsPanel.hidden) setSettingsOpen(false);
 });
@@ -512,6 +843,11 @@ await listen<{ code: number | null }>("jarvis-backend-exit", ({ payload }) => {
   backendReady = false;
   busy = false;
   recording = false;
+  for (const pending of pendingBackendRequests.values()) {
+    pending.reject(new Error("The backend connection closed."));
+  }
+  pendingBackendRequests.clear();
+  setMemoryFeedback("Memory controls are unavailable.", "error");
   setBackendDiagnostic(payload.code === 0 ? "Stopped" : "Crashed", "error");
   setStatus(payload.code === 0 ? "Backend stopped" : "Backend crashed", "error");
 });
