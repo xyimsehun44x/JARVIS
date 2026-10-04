@@ -12,6 +12,7 @@ from googleapiclient.discovery import build
 
 
 GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
@@ -86,7 +87,7 @@ class GoogleOAuth:
 def scopes_for_settings(settings) -> list[str]:
     scopes: list[str] = []
     if settings.enable_gmail:
-        scopes.append(GMAIL_COMPOSE_SCOPE)
+        scopes.extend([GMAIL_COMPOSE_SCOPE, GMAIL_READONLY_SCOPE])
     if settings.enable_calendar:
         scopes.append(
             CALENDAR_EVENTS_SCOPE

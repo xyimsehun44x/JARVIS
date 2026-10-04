@@ -1,11 +1,11 @@
 # Jarvis Project Handoff — 2026-09-14
 
 Original checkpoint: 2026-09-14
-Last updated: 2026-10-03
+Last updated: 2026-10-04
 
 This is the primary continuation document for the next development chat. It records the
 implemented state, live validation results, safety constraints, open work, milestone
-status, and recommended roadmap as of 2026-10-03. The filename retains the original
+status, and recommended roadmap as of 2026-10-04. The filename retains the original
 handoff date so existing links remain valid.
 
 ## Read this first
@@ -39,15 +39,16 @@ Current milestone status:
 | 2. Measured voice optimization | Complete | Accuracy profile, normalization, vocabulary, streaming, natural TTS |
 | 3. Windows desktop vertical slice | Complete | Tauri app, voice, tray, hotkey, settings, diagnostics validated |
 | 4. Structured long-term memory | Complete | Explicit lifecycle, safe retrieval, migration, desktop controls, and live validation |
-| 5. Provider-specific reconciliation | Not started | Resolve ambiguous Gmail/Calendar writes safely |
+| 5. Provider-specific reconciliation | Complete | Stable provider IDs, fail-closed verification, safe retry proof |
 | 6. Realtime voice conversation | Not started | Endpoint detection, incremental STT, barge-in, cancellation |
 | 7. Safe local OS actions | Not started | Allowlisted deterministic Windows commands |
 | 8. Production hardening/distribution | Not started | Credential store, sidecar packaging, signing, installers |
 
 Latest verification:
 
-- Python suite: **162 passing tests**.
+- Python suite: **171 passing tests**.
 - Focused memory/IPC suite: **23 passing tests**.
+- Focused reconciliation/provider suite: **22 passing tests**.
 - Desktop TypeScript/Vite production build: passing with Vite 7.3.6.
 - Rust/Tauri suite: **6 passing tests** against Tauri 2.11.5; Clippy passes with warnings denied.
 - Latest live desktop run: Gemini streaming recovered with no fallback, and the response
@@ -153,8 +154,9 @@ The second Milestone 4 slice completed on 2026-09-24:
 - Memory controls remain context-only and do not create approval or execution authority
   for email, calendar, or device actions.
 - Added IPC lifecycle, parameter-validation, credential-filtering, and migration tests.
-  The full Python suite passed all 158 tests at implementation time; the current suite has
-  162 passing tests. The TypeScript/Vite build, Rust suite, and Rust formatting check pass.
+  The full Python suite passed all 158 tests at implementation time and 162 tests at
+  Milestone 4 completion. The TypeScript/Vite build, Rust suite, and Rust formatting
+  check pass.
 
 The first 2026-09-24 live attempt exposed a persisted-interrupt recovery defect rather
 than a Gemini-key failure. The `desktop-main` thread still held an older email contact
@@ -179,10 +181,39 @@ Milestone 4 live acceptance completed on 2026-10-03:
   restoration, and restart-persistence flows behaved as designed.
 - Sensitive and credential-like memory turns are redacted when persisted, and model-facing
   history is scrubbed dynamically so older desktop transcripts cannot bypass the sensitive
-  memory retrieval boundary. The focused 23-test suite and full 162-test suite pass.
+  memory retrieval boundary. The focused 23-test suite and full 162-test suite passed at
+  Milestone 4 completion.
 
-Milestone 4 is complete. The next implementation milestone is provider-specific
-reconciliation.
+Milestone 4 is complete.
+
+Milestone 5 completed on 2026-10-04 without enabling any live-write lock:
+
+- Durable execution records now store a stable provider operation ID, remote resource ID,
+  first/last attempt timestamps, attempt count, last reconciliation time, and explicit
+  reconciliation status. The SQLite migration preserves existing execution rows and does
+  not store credentials, approved email bodies, or Calendar payloads.
+- Recovery outcomes are provider-specific and explicit: `verified`, `not_applied`, or
+  `uncertain`. An uncertain execution is retried only after the provider proves
+  `not_applied`; missing or failed verification remains blocked.
+- Google Calendar creates use a deterministic client-generated event ID supported by the
+  Calendar API. Exact `events.get` reads distinguish an applied create from a missing one,
+  prevent duplicates across restart, and conservatively reconcile updates/cancellations
+  against their exact event IDs and approved fields.
+- Gmail sends and drafts carry a deterministic RFC `Message-ID`. Reconciliation searches
+  for that marker, reads the immutable message/draft ID, and verifies recipient, subject,
+  and body transiently without persisting content. A missing Gmail search result is
+  insufficient proof, so an ambiguous send is never retried automatically.
+- Gmail OAuth now requests compose plus read-only scopes because sent-message search and
+  verification are unavailable to the compose-only scope. Existing compose-only users
+  will receive one interactive reauthorization prompt on their next Google operation.
+- Deterministic fake-provider coverage exercises success, timeout before application,
+  timeout after application, duplicate prevention, failed verification, SQLite migration,
+  and recovery across process restart. The focused provider suite passes 22 tests and the
+  full Python suite passes all 171 tests.
+
+Milestone 5 is complete. The next implementation milestone is realtime voice
+conversation. Gmail sending and Calendar writes remain locked by default; no live write
+was performed during implementation or testing.
 
 ## Product and architecture implemented
 
@@ -484,8 +515,9 @@ and compare repeatable warm P50/P95 measurements.
 
 ### Integration/recovery gaps
 
-- Generic uncertain-write handling exists, but automatic provider-specific Gmail and
-  Calendar reconciliation is incomplete.
+- Provider-specific Gmail and Calendar reconciliation is complete and fail-closed. Live
+  write validation remains optional and requires a separate explicit decision to unlock
+  the relevant provider.
 - Unsupported live-data domains remain unavailable by design.
 - There is no automatic location/geolocation service; weather uses supplied/configured
   location.
@@ -563,12 +595,16 @@ recoverably forgettable, restart-persistent, sensitive by policy, and unable to 
 external actions. Continue using structured lexical retrieval; add embeddings only if
 measured retrieval quality needs them.
 
-### Milestone 5 — provider-specific reconciliation
+### Milestone 5 — provider-specific reconciliation: complete
 
-- Add stable operation identifiers and provider metadata.
-- Reconcile uncertain Gmail sends/drafts and Calendar writes using verified provider
-  behavior.
-- Never retry if the remote outcome cannot be proven.
+Delivered stable operation identifiers, durable provider metadata, exact Gmail and
+Calendar verification reads, conservative three-state reconciliation, safe-retry proof,
+restart recovery, legacy SQLite migration, and deterministic failure-mode coverage. Live
+provider write locks remain off by default.
+
+The exit condition is met: an ambiguous provider response cannot cause an automatic
+duplicate Gmail send/draft or Calendar write, and unresolved outcomes remain visibly
+`uncertain` rather than being reported as success.
 
 ### Milestone 6 — realtime voice conversation
 
@@ -601,21 +637,18 @@ vertical slices above.
 
 ## Exact next action
 
-Begin Milestone 5 with provider-specific reconciliation:
+Begin Milestone 6 with the realtime voice interaction controller:
 
-1. Inventory the exact stable identifiers and verification reads available for Gmail
-   drafts/sends and Google Calendar creates/updates/cancellations.
-2. Extend execution records with provider operation IDs, remote resource IDs, attempt
-   timestamps, and reconciliation status without storing credentials or message bodies.
-3. Add provider-specific reconciliation methods that can prove `verified`, `not_applied`,
-   or `uncertain`; never infer success from a timeout or generic transport error.
-4. Permit retry only after a verified `not_applied` result. Leave unresolved outcomes
-   blocked as `uncertain` and explain that state to the user.
-5. Build deterministic fake-provider tests for success, timeout-before-write,
-   timeout-after-write, duplicate prevention, restart recovery, and failed verification
-   before any live write testing.
-6. Keep Gmail sending and Calendar writes locked during implementation. Any later live
-   write test requires a separate explicit user decision and exact-payload approval.
+1. Define one explicit voice state machine for idle, listening, endpoint-detected,
+   transcribing, thinking, speaking, interrupted, cancelled, and failed states.
+2. Separate capture lifecycle from transcription so automatic endpoint detection can end
+   an utterance without blocking or bypassing the existing confidence/action gate.
+3. Add a cancellable speech-playback controller and deterministic stop-speaking command
+   before implementing barge-in.
+4. Add timing and state-transition tests for manual completion, endpoint completion,
+   cancellation, interruption, stale callbacks, and backend shutdown.
+5. Preserve push-to-talk as a fallback and do not add a wake word until endpointing,
+   cancellation, and barge-in are reliable.
 
 The 2026-09-19 smoke test also showed microphone RMS back at -34.4 to -39.8 dBFS after a
 previous run near -20 dBFS. Check the selected input device, Windows gain, and microphone
@@ -745,8 +778,8 @@ benchmarks/VOICE_BASELINE.md    complete voice benchmark history and protocol
 
 > Read `PROJECT_HANDOFF_2026_09_14.md` and `claudev2.5.md` completely, then inspect the
 > current working tree without discarding uncommitted changes. Treat the dated handoff as
-> the current implementation record. Milestones 0 through 4 are complete; Milestone 5 is
-> next. The Python suite has 162 passing tests, the desktop Vite build passes, and
+> the current implementation record. Milestones 0 through 5 are complete; Milestone 6 is
+> next. The Python suite has 171 passing tests, the desktop Vite build passes, and
 > the latest desktop run restored Gemini streaming with 1,397–2,780ms first-token times
 > and roughly 6,157ms median speech onset. A 2026-09-19 smoke test confirmed that normal
 > Tier-1 and Tier-2 response bubbles now appear when speech begins instead of after
@@ -759,8 +792,11 @@ benchmarks/VOICE_BASELINE.md    complete voice benchmark history and protocol
 > controls for inspect/correct/forget/restore are implemented and live-validated.
 > A persisted-interrupt replay defect and revoked Google Workspace OAuth token were found;
 > safe pending-task abandonment and revoked-token reauthorization are now implemented.
-> Begin provider-specific reconciliation with fake-provider tests and keep Gmail sending
-> and Calendar writes locked. Preserve the shared LangGraph thread, exact approval
+> Provider-specific reconciliation now uses stable Calendar event IDs and Gmail RFC
+> Message-IDs, explicit verified/not-applied/uncertain outcomes, durable attempt metadata,
+> and restart-safe fake-provider coverage. Gmail sending and Calendar writes remain
+> locked. Begin the realtime voice interaction controller while preserving push-to-talk
+> as a fallback. Preserve the shared LangGraph thread, exact approval
 > safeguards, CLI paths, and
 > locked Gmail-send/Calendar-write settings. Do not reorganize `jarvis/` or expose any
 > credentials.

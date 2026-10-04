@@ -161,7 +161,16 @@ hardening task.
 - The approved proposal is hashed and recorded before execution.
 - In SQLite mode, a repeated identical approved payload is not executed again after a
   process restart. Interrupted or ambiguous external writes become `uncertain` and are
-  not retried until reconciliation explicitly verifies the result or declares a retry safe.
+  not retried until provider-specific reconciliation proves the result or proves the
+  original write was not applied.
+- Execution records contain stable provider operation IDs, remote resource IDs, attempt
+  timestamps/counts, and reconciliation state, but never credentials or message bodies.
+- Calendar creates use a client-generated Google event ID, so a timeout can be checked and
+  a confirmed missing event can be retried without creating a duplicate. Updates and
+  cancellations reconcile against the exact event ID and approved payload.
+- Gmail sends and drafts carry a deterministic RFC `Message-ID`. Jarvis searches and
+  verifies the immutable Gmail resource after an ambiguous response; a missing search
+  result is not treated as proof that sending failed, so it never triggers an unsafe retry.
 - Success is reported only when the provider returns a verified result.
 - Long-term memory writes require an explicit user request in V0.1.
 
@@ -192,7 +201,9 @@ controls cannot authorize email, calendar, or operating-system actions.
 
 Credentials, tokens, local databases, and `.env` are ignored by Git. Google mode is
 lazy: starting Jarvis does not authorize an account, and API access occurs only when a
-specialist needs it.
+specialist needs it. Gmail reconciliation uses both compose and read-only Gmail scopes;
+an older compose-only token will require one interactive Google reauthorization after
+upgrading.
 
 ## Project map
 

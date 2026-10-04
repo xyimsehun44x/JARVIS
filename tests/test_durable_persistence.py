@@ -125,12 +125,14 @@ def test_recovery_retries_only_after_explicit_safe_retry_decision(tmp_path) -> N
     retried = registry.execute_once(
         action,
         lambda: calls.append("retry") or {"ok": True, "event_id": "event-1"},
-        recover=lambda _: RecoveryDecision(outcome="retry"),
+        recover=lambda _: RecoveryDecision(outcome="not_applied"),
     )
     registry.close()
 
     assert calls == ["retry"]
     assert retried.status == "verified"
+    assert retried.reconciliation_status == "verified"
+    assert retried.attempt_count == 2
 
 
 def test_conversation_and_pending_interrupt_survive_restart(tmp_path) -> None:

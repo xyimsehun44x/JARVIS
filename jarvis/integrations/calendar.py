@@ -10,6 +10,7 @@ from jarvis.agents.calendar.schemas import (
     CalendarExecutionResult,
     CalendarProposal,
 )
+from jarvis.core.execution import RecoveryDecision
 
 
 class CalendarProvider(Protocol):
@@ -17,6 +18,9 @@ class CalendarProvider(Protocol):
     def create_event(self, proposal: CalendarProposal) -> CalendarExecutionResult: ...
     def update_event(self, proposal: CalendarProposal) -> CalendarExecutionResult: ...
     def cancel_event(self, proposal: CalendarProposal) -> CalendarExecutionResult: ...
+    def reconcile(
+        self, proposal: CalendarProposal, external_resource_id: str | None
+    ) -> RecoveryDecision: ...
 
 
 class MockCalendarProvider:
@@ -56,7 +60,11 @@ class MockCalendarProvider:
         )
 
     def create_event(self, proposal: CalendarProposal) -> CalendarExecutionResult:
-        event_id = proposal.event_id or f"event-{uuid4().hex[:10]}"
+        event_id = (
+            proposal.event_id
+            or proposal.provider_operation_id
+            or f"event-{uuid4().hex[:10]}"
+        )
         self.events.append(
             CalendarEvent(event_id=event_id, **proposal.model_dump(exclude={"operation", "event_id"}))
         )
@@ -81,6 +89,76 @@ class MockCalendarProvider:
                 self.events.remove(event)
                 return CalendarExecutionResult(ok=True, event_id=event.event_id)
         return CalendarExecutionResult(ok=False, error="Event not found")
+
+    def reconcile(
+        self, proposal: CalendarProposal, external_resource_id: str | None
+    ) -> RecoveryDecision:
+        event_id = (
+            external_resource_id
+            or proposal.event_id
+            or proposal.provider_operation_id
+        )
+        event = next((item for item in self.events if item.event_id == event_id), None)
+        if proposal.operation == "cancel_event":
+            if event is None:
+                return RecoveryDecision(
+                    outcome="verified",
+                    external_resource_id=event_id,
+                    result={
+                        "ok": True,
+                        "event_id": event_id,
+                        "reconciled": True,
+                    },
+                )
+            return RecoveryDecision(
+                outcome="not_applied",
+                external_resource_id=event_id,
+                result={"ok": False, "not_applied": True, "reconciled": True},
+            )
+        if event is None:
+            outcome = (
+                "not_applied"
+                if proposal.operation == "create_event"
+                else "uncertain"
+            )
+            return RecoveryDecision(
+                outcome=outcome,
+                external_resource_id=event_id,
+                result={
+                    "ok": False,
+                    "not_applied": outcome == "not_applied",
+                    "outcome_uncertain": outcome == "uncertain",
+                    "reconciled": True,
+                },
+            )
+        if self._matches(event, proposal):
+            return RecoveryDecision(
+                outcome="verified",
+                external_resource_id=event.event_id,
+                result={
+                    "ok": True,
+                    "event_id": event.event_id,
+                    "reconciled": True,
+                },
+            )
+        return RecoveryDecision(
+            outcome="uncertain",
+            external_resource_id=event.event_id,
+            result={
+                "ok": False,
+                "outcome_uncertain": True,
+                "error": "Calendar event did not match the approved payload",
+            },
+        )
+
+    @staticmethod
+    def _matches(event: CalendarEvent, proposal: CalendarProposal) -> bool:
+        return (
+            event.title == proposal.title
+            and event.start == proposal.start
+            and event.end == proposal.end
+            and sorted(event.attendees) == sorted(proposal.attendees)
+        )
 
 
 class GoogleCalendarProvider:
@@ -130,7 +208,7 @@ class GoogleCalendarProvider:
                 service.events()
                 .insert(
                     calendarId=self.calendar_id,
-                    body=self._body(proposal),
+                    body=self._body(proposal, include_operation_id=True),
                     sendUpdates="all",
                 )
                 .execute()
@@ -210,6 +288,78 @@ class GoogleCalendarProvider:
                 error=f"Calendar cancellation ended without a verified outcome: {exc}",
             )
 
+    def reconcile(
+        self, proposal: CalendarProposal, external_resource_id: str | None
+    ) -> RecoveryDecision:
+        event_id = (
+            external_resource_id
+            or proposal.event_id
+            or proposal.provider_operation_id
+        )
+        if not event_id:
+            return self._uncertain("The execution has no stable Calendar event ID")
+        try:
+            item = (
+                self.oauth.service("calendar", "v3")
+                .events()
+                .get(calendarId=self.calendar_id, eventId=event_id)
+                .execute()
+            )
+        except Exception as exc:
+            if not self._is_not_found(exc):
+                return self._uncertain(f"Calendar reconciliation failed: {exc}")
+            if proposal.operation == "cancel_event":
+                return RecoveryDecision(
+                    outcome="verified",
+                    external_resource_id=event_id,
+                    result={
+                        "ok": True,
+                        "event_id": event_id,
+                        "reconciled": True,
+                    },
+                )
+            if proposal.operation == "create_event":
+                return RecoveryDecision(
+                    outcome="not_applied",
+                    external_resource_id=event_id,
+                    result={
+                        "ok": False,
+                        "event_id": event_id,
+                        "not_applied": True,
+                        "reconciled": True,
+                    },
+                )
+            return self._uncertain(
+                "Calendar could not find the event targeted by the update"
+            )
+
+        if proposal.operation == "cancel_event":
+            return RecoveryDecision(
+                outcome="not_applied",
+                external_resource_id=event_id,
+                result={
+                    "ok": False,
+                    "event_id": event_id,
+                    "not_applied": True,
+                    "reconciled": True,
+                },
+            )
+        event = self._to_event(item)
+        if event is not None and MockCalendarProvider._matches(event, proposal):
+            return RecoveryDecision(
+                outcome="verified",
+                external_resource_id=event_id,
+                result={
+                    "ok": True,
+                    "event_id": event_id,
+                    "reconciled": True,
+                },
+            )
+        return self._uncertain(
+            "The Calendar event found for this operation did not match the approved payload",
+            event_id=event_id,
+        )
+
     def _verify(
         self, event_id: str | None, proposal: CalendarProposal
     ) -> CalendarExecutionResult:
@@ -234,7 +384,7 @@ class GoogleCalendarProvider:
                 error=f"Calendar accepted the write but verification failed: {exc}",
             )
         event = self._to_event(item)
-        ok = bool(event and event.title == proposal.title and event.start == proposal.start)
+        ok = bool(event and MockCalendarProvider._matches(event, proposal))
         return CalendarExecutionResult(
             ok=ok,
             event_id=event_id,
@@ -242,8 +392,10 @@ class GoogleCalendarProvider:
             error=None if ok else "Calendar verification did not match the approved payload",
         )
 
-    def _body(self, proposal: CalendarProposal) -> dict:
-        return {
+    def _body(
+        self, proposal: CalendarProposal, *, include_operation_id: bool = False
+    ) -> dict:
+        body = {
             "summary": proposal.title,
             "start": {
                 "dateTime": self._aware(proposal.start).isoformat(),
@@ -255,6 +407,9 @@ class GoogleCalendarProvider:
             },
             "attendees": [{"email": email} for email in proposal.attendees],
         }
+        if include_operation_id and proposal.provider_operation_id:
+            body["id"] = proposal.provider_operation_id
+        return body
 
     def _to_event(self, item: dict) -> CalendarEvent | None:
         start_data = item.get("start", {})
@@ -290,4 +445,16 @@ class GoogleCalendarProvider:
         return CalendarExecutionResult(
             ok=False,
             error="Live Calendar writes are disabled by JARVIS_ALLOW_CALENDAR_WRITES",
+        )
+
+    @staticmethod
+    def _is_not_found(exc: Exception) -> bool:
+        return getattr(getattr(exc, "resp", None), "status", None) in {404, 410}
+
+    @staticmethod
+    def _uncertain(error: str, *, event_id: str | None = None) -> RecoveryDecision:
+        return RecoveryDecision(
+            outcome="uncertain",
+            external_resource_id=event_id,
+            result={"ok": False, "outcome_uncertain": True, "error": error},
         )

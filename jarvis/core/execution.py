@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from collections.abc import Callable
@@ -18,15 +19,23 @@ class ExecutionRecord(BaseModel):
     execution_id: str
     approved_payload_hash: str
     tool_name: str
+    provider_operation_id: str | None = None
     external_resource_id: str | None = None
     status: Literal["executing", "verified", "failed", "uncertain"]
+    reconciliation_status: Literal[
+        "not_required", "pending", "verified", "not_applied", "uncertain"
+    ] = "not_required"
+    first_attempt_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
+    attempt_count: int = 0
     result: dict[str, Any] | None = None
 
 
 class RecoveryDecision(BaseModel):
     """Result of checking an interrupted operation against its external provider."""
 
-    outcome: Literal["verified", "failed", "retry", "uncertain"]
+    outcome: Literal["verified", "not_applied", "uncertain"]
     external_resource_id: str | None = None
     result: dict[str, Any] | None = None
 
@@ -41,6 +50,11 @@ def payload_hash(action: ProposedAction) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def provider_operation_id(action: ProposedAction) -> str:
+    """Return a stable, provider-safe identifier for one approved payload."""
+    return f"jarvis{payload_hash(action)[:32]}"
 
 
 class ExecutionRegistry:
@@ -59,12 +73,37 @@ class ExecutionRegistry:
                     approved_payload_hash TEXT PRIMARY KEY,
                     execution_id TEXT NOT NULL,
                     tool_name TEXT NOT NULL,
+                    provider_operation_id TEXT,
                     external_resource_id TEXT,
                     status TEXT NOT NULL,
+                    reconciliation_status TEXT,
+                    first_attempt_at TEXT,
+                    last_attempt_at TEXT,
+                    last_reconciled_at TEXT,
+                    attempt_count INTEGER,
                     result_json TEXT
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(execution_records)"
+                ).fetchall()
+            }
+            migrations = {
+                "provider_operation_id": "TEXT",
+                "reconciliation_status": "TEXT",
+                "first_attempt_at": "TEXT",
+                "last_attempt_at": "TEXT",
+                "last_reconciled_at": "TEXT",
+                "attempt_count": "INTEGER",
+            }
+            for name, sql_type in migrations.items():
+                if name not in columns:
+                    self._connection.execute(
+                        f"ALTER TABLE execution_records ADD COLUMN {name} {sql_type}"
+                    )
             self._connection.commit()
 
     def execute_once(
@@ -73,14 +112,22 @@ class ExecutionRegistry:
         operation: Callable[[], dict[str, Any]],
         *,
         recover: Callable[[ExecutionRecord], RecoveryDecision] | None = None,
+        operation_id: str | None = None,
     ) -> ExecutionRecord:
         digest = payload_hash(action)
+        stable_operation_id = operation_id or provider_operation_id(action)
         with self._lock:
             previous = self._load(digest)
             if previous and previous.status == "verified":
                 return previous
 
+            reconciled = False
             if previous and previous.status in {"executing", "uncertain"}:
+                if previous.provider_operation_id is None:
+                    previous.provider_operation_id = stable_operation_id
+                previous.reconciliation_status = "pending"
+                previous.last_reconciled_at = self._now()
+                self._save(previous)
                 try:
                     decision = recover(previous) if recover else None
                 except Exception as exc:
@@ -95,41 +142,65 @@ class ExecutionRegistry:
                     )
                 if decision is None or decision.outcome == "uncertain":
                     return self._mark_uncertain(previous, decision)
-                if decision.outcome != "retry":
-                    previous.status = decision.outcome
+                if decision.outcome == "verified":
+                    previous.status = "verified"
+                    previous.reconciliation_status = "verified"
                     if decision.external_resource_id:
                         previous.external_resource_id = decision.external_resource_id
                     previous.result = decision.result
                     self._save(previous)
                     return previous
+                # Only an explicit provider proof of ``not_applied`` reaches this
+                # branch and permits another write attempt.
+                record = previous
+                record.status = "executing"
+                record.reconciliation_status = "not_applied"
+                record.result = None
+                self._save(record)
+                reconciled = True
+            elif previous:
                 record = previous
                 record.status = "executing"
                 record.result = None
-                self._save(record)
             else:
                 record = ExecutionRecord(
                     execution_id=str(uuid4()),
                     approved_payload_hash=digest,
                     tool_name=action.tool_name,
+                    provider_operation_id=stable_operation_id,
                     status="executing",
                 )
-                self._save(record)
+
+            if record.provider_operation_id is None:
+                record.provider_operation_id = stable_operation_id
+            now = self._now()
+            record.first_attempt_at = record.first_attempt_at or now
+            record.last_attempt_at = now
+            record.attempt_count += 1
+            self._save(record)
 
             try:
                 result = operation()
                 ok = bool(result.get("ok"))
                 if ok:
                     record.status = "verified"
+                    record.reconciliation_status = (
+                        "verified" if reconciled else "not_required"
+                    )
                 elif result.get("outcome_uncertain"):
                     record.status = "uncertain"
+                    record.reconciliation_status = "uncertain"
                 else:
                     record.status = "failed"
+                    if not reconciled:
+                        record.reconciliation_status = "not_required"
                 record.external_resource_id = (
                     result.get("message_id") or result.get("draft_id") or result.get("event_id")
                 )
                 record.result = result
             except Exception as exc:  # providers are an explicit failure boundary
                 record.status = "uncertain"
+                record.reconciliation_status = "uncertain"
                 record.result = {
                     "ok": False,
                     "outcome_uncertain": True,
@@ -146,6 +217,7 @@ class ExecutionRegistry:
         decision: RecoveryDecision | None = None,
     ) -> ExecutionRecord:
         record.status = "uncertain"
+        record.reconciliation_status = "uncertain"
         if decision and decision.external_resource_id:
             record.external_resource_id = decision.external_resource_id
         if decision and decision.result:
@@ -167,6 +239,14 @@ class ExecutionRegistry:
             self._connection.close()
             self._connection = None
 
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _parse_datetime(value: str | None) -> datetime | None:
+        return datetime.fromisoformat(value) if value else None
+
     def _load(self, digest: str) -> ExecutionRecord | None:
         if digest in self._by_hash:
             return self._by_hash[digest]
@@ -174,8 +254,9 @@ class ExecutionRegistry:
             return None
         row = self._connection.execute(
             """
-            SELECT execution_id, approved_payload_hash, tool_name, external_resource_id,
-                   status, result_json
+            SELECT execution_id, approved_payload_hash, tool_name, provider_operation_id,
+                   external_resource_id, status, reconciliation_status, first_attempt_at,
+                   last_attempt_at, last_reconciled_at, attempt_count, result_json
             FROM execution_records WHERE approved_payload_hash = ?
             """,
             (digest,),
@@ -186,9 +267,15 @@ class ExecutionRegistry:
             execution_id=row[0],
             approved_payload_hash=row[1],
             tool_name=row[2],
-            external_resource_id=row[3],
-            status=row[4],
-            result=json.loads(row[5]) if row[5] else None,
+            provider_operation_id=row[3],
+            external_resource_id=row[4],
+            status=row[5],
+            reconciliation_status=row[6] or "not_required",
+            first_attempt_at=self._parse_datetime(row[7]),
+            last_attempt_at=self._parse_datetime(row[8]),
+            last_reconciled_at=self._parse_datetime(row[9]),
+            attempt_count=row[10] or 0,
+            result=json.loads(row[11]) if row[11] else None,
         )
         self._by_hash[digest] = record
         return record
@@ -200,22 +287,35 @@ class ExecutionRegistry:
         self._connection.execute(
             """
             INSERT INTO execution_records (
-                approved_payload_hash, execution_id, tool_name, external_resource_id,
-                status, result_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                approved_payload_hash, execution_id, tool_name, provider_operation_id,
+                external_resource_id, status, reconciliation_status, first_attempt_at,
+                last_attempt_at, last_reconciled_at, attempt_count, result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(approved_payload_hash) DO UPDATE SET
                 execution_id=excluded.execution_id,
                 tool_name=excluded.tool_name,
+                provider_operation_id=excluded.provider_operation_id,
                 external_resource_id=excluded.external_resource_id,
                 status=excluded.status,
+                reconciliation_status=excluded.reconciliation_status,
+                first_attempt_at=excluded.first_attempt_at,
+                last_attempt_at=excluded.last_attempt_at,
+                last_reconciled_at=excluded.last_reconciled_at,
+                attempt_count=excluded.attempt_count,
                 result_json=excluded.result_json
             """,
             (
                 record.approved_payload_hash,
                 record.execution_id,
                 record.tool_name,
+                record.provider_operation_id,
                 record.external_resource_id,
                 record.status,
+                record.reconciliation_status,
+                record.first_attempt_at.isoformat() if record.first_attempt_at else None,
+                record.last_attempt_at.isoformat() if record.last_attempt_at else None,
+                record.last_reconciled_at.isoformat() if record.last_reconciled_at else None,
+                record.attempt_count,
                 json.dumps(record.result, sort_keys=True) if record.result is not None else None,
             ),
         )

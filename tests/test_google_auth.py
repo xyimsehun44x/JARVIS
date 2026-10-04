@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from google.auth.exceptions import RefreshError
 
+from jarvis.config import Settings
 from jarvis.integrations import google_auth
 
 
@@ -70,3 +71,12 @@ def test_revoked_google_refresh_token_requires_setup_when_noninteractive(
 
     with pytest.raises(RuntimeError, match="--setup-google"):
         oauth.authorize(interactive=False)
+
+
+def test_gmail_reconciliation_requests_compose_and_readonly_scopes() -> None:
+    scopes = google_auth.scopes_for_settings(
+        Settings(enable_gmail=True, enable_calendar=False, enable_contacts=False)
+    )
+
+    assert google_auth.GMAIL_COMPOSE_SCOPE in scopes
+    assert google_auth.GMAIL_READONLY_SCOPE in scopes

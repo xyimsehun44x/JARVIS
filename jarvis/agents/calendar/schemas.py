@@ -36,6 +36,7 @@ class CalendarProposal(BaseModel):
     start: datetime
     end: datetime
     attendees: list[str] = Field(default_factory=list)
+    provider_operation_id: str | None = Field(default=None, exclude=True)
 
 
 class CalendarExecutionResult(BaseModel):

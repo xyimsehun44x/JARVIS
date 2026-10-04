@@ -26,7 +26,12 @@ from jarvis.core.brain import (
     OpenAIConversationModel,
     RuleBasedConversationModel,
 )
-from jarvis.core.execution import ExecutionRecord, ExecutionRegistry
+from jarvis.core.execution import (
+    ExecutionRecord,
+    ExecutionRegistry,
+    RecoveryDecision,
+    provider_operation_id,
+)
 from jarvis.core.graph import build_graph
 from jarvis.core.latency import LatencyRecorder
 from jarvis.core.permissions import PermissionPolicy, ProposedAction, RiskLevel
@@ -1028,14 +1033,24 @@ class Jarvis:
                 break
             proposal = self._cached_email_revision(proposal, answer)
 
+        operation_id = provider_operation_id(action)
+        provider_proposal = proposal.model_copy(
+            update={"provider_operation_id": operation_id}
+        )
         if proposal.operation == "send":
             record = self.executions.execute_once(
-                action, lambda: self._execute_gmail(proposal)
+                action,
+                lambda: self._execute_gmail(provider_proposal),
+                recover=lambda prior: self._reconcile_gmail(provider_proposal, prior),
+                operation_id=operation_id,
             )
             success = "Sent." if record.status == "verified" else self._failure_message(record)
         else:
             record = self.executions.execute_once(
-                action, lambda: self._execute_gmail(proposal)
+                action,
+                lambda: self._execute_gmail(provider_proposal),
+                recover=lambda prior: self._reconcile_gmail(provider_proposal, prior),
+                operation_id=operation_id,
             )
             success = "Draft saved." if record.status == "verified" else self._failure_message(record)
         return success, record
@@ -1066,7 +1081,18 @@ class Jarvis:
             )
             if not self._is_approval(answer):
                 return "Very well. I haven’t created anything.", state.get("recent_events", []), None
-            record = self.executions.execute_once(action, lambda: self._execute_calendar(proposal))
+            operation_id = provider_operation_id(action)
+            provider_proposal = proposal.model_copy(
+                update={"provider_operation_id": operation_id}
+            )
+            record = self.executions.execute_once(
+                action,
+                lambda: self._execute_calendar(provider_proposal),
+                recover=lambda prior: self._reconcile_calendar(
+                    provider_proposal, prior
+                ),
+                operation_id=operation_id,
+            )
             if record.status != "verified":
                 return self._failure_message(record), state.get("recent_events", []), record
             return f"Done. {proposal.title} has been added to your calendar.", [], record
@@ -1173,7 +1199,16 @@ class Jarvis:
         if not self._is_approval(answer):
             return "Very well. I haven’t changed anything.", state.get("recent_events", []), None
 
-        record = self.executions.execute_once(action, lambda: self._execute_calendar(proposal))
+        operation_id = provider_operation_id(action)
+        provider_proposal = proposal.model_copy(
+            update={"provider_operation_id": operation_id}
+        )
+        record = self.executions.execute_once(
+            action,
+            lambda: self._execute_calendar(provider_proposal),
+            recover=lambda prior: self._reconcile_calendar(provider_proposal, prior),
+            operation_id=operation_id,
+        )
         if record.status != "verified":
             return self._failure_message(record), state.get("recent_events", []), record
         verb = "cancelled" if proposal.operation == "cancel_event" else "updated"
@@ -1324,6 +1359,38 @@ class Jarvis:
             else:
                 result = self.gmail.save_draft(proposal)
         return result.model_dump(mode="json")
+
+    def _reconcile_gmail(
+        self, proposal: EmailProposal, record: ExecutionRecord
+    ) -> RecoveryDecision:
+        reconcile = getattr(self.gmail, "reconcile", None)
+        if reconcile is None:
+            return RecoveryDecision(
+                outcome="uncertain",
+                external_resource_id=record.external_resource_id,
+                result={
+                    "ok": False,
+                    "outcome_uncertain": True,
+                    "error": "The Gmail provider cannot reconcile this operation safely",
+                },
+            )
+        return reconcile(proposal, record.external_resource_id)
+
+    def _reconcile_calendar(
+        self, proposal: CalendarProposal, record: ExecutionRecord
+    ) -> RecoveryDecision:
+        reconcile = getattr(self.calendar, "reconcile", None)
+        if reconcile is None:
+            return RecoveryDecision(
+                outcome="uncertain",
+                external_resource_id=record.external_resource_id,
+                result={
+                    "ok": False,
+                    "outcome_uncertain": True,
+                    "error": "The Calendar provider cannot reconcile this operation safely",
+                },
+            )
+        return reconcile(proposal, record.external_resource_id)
 
     @staticmethod
     def _format_prepared_email(proposal: EmailProposal) -> str:

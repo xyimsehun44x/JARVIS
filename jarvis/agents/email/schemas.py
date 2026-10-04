@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EmailRequest(BaseModel):
@@ -26,6 +26,7 @@ class EmailProposal(BaseModel):
     subject: str
     body: str
     operation: Literal["prepare", "save_draft", "send"]
+    provider_operation_id: str | None = Field(default=None, exclude=True)
 
 
 class EmailExecutionResult(BaseModel):
